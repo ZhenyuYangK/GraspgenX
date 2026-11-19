@@ -15,8 +15,6 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 HOME = np.array([-1., 0., 0., -1.57079, 0., 1.57079, -.7853, .04, .04])
 SILVER = (.63, .67, .72, 1.)
-BLACK = (.08, .09, .11, 1.)
-RED = (.77, .055, .035, 1.)
 
 
 def _s(values):
@@ -83,22 +81,6 @@ def _geom(body, kind, *, size=None, pos=None, rgba=SILVER, **extra):
     attrs.update({key: _s(value) if isinstance(value, (list, tuple, np.ndarray)) else str(value)
                   for key, value in extra.items()})
     return ET.SubElement(body, "geom", attrs)
-
-
-def _ring(body, center, radius, radial_half, axial_half, plane="xy", rgba=SILVER, n=24):
-    """Tangential boxes form an open ring, including its concave collision space."""
-    center = np.array(center)
-    for i in range(n):
-        angle = 2 * np.pi * i / n
-        c, s = np.cos(angle), np.sin(angle)
-        if plane == "xy":
-            p = center + radius * np.array([c, s, 0])
-            _geom(body, "box", size=[radial_half, radius * np.tan(np.pi/n) + .0003, axial_half],
-                  pos=p, euler=[0, 0, angle], rgba=rgba)
-        else:
-            p = center + radius * np.array([c, 0, s])
-            _geom(body, "box", size=[radial_half, axial_half, radius * np.tan(np.pi/n) + .0003],
-                  pos=p, euler=[0, -angle, 0], rgba=rgba)
 
 
 def _loft_faces(sections, *, loop=False):
@@ -271,11 +253,68 @@ def _wrench(body, assets):
                [handle[i:i+2] for i in range(len(handle) - 1)], material="tool_steel")
 
 
-def _screwdriver(body, _assets):
-    _geom(body, "capsule", size=[.017], fromto=[-.064, 0, .018, -.018, 0, .018], rgba=RED)
-    _geom(body, "cylinder", size=[.012, .008], pos=[-.01, 0, .018], euler=[0, np.pi/2, 0], rgba=BLACK)
-    _geom(body, "capsule", size=[.005], fromto=[-.005, 0, .018, .066, 0, .018])
-    _geom(body, "box", size=[.008, .008, .003], pos=[.072, 0, .018])
+def _screwdriver(body, assets):
+    angle = np.linspace(0, 2 * np.pi, 64, endpoint=False)
+    # Palm swell, finger waist and flared guard of a two-material moulded handle.
+    # The slightly flattened six-lobed section also keeps the tool from rolling.
+    stations = [
+        (-.080, .0030, .0030), (-.079, .0068, .0065),
+        (-.076, .0108, .0105), (-.070, .0138, .0135),
+        (-.060, .0150, .0148), (-.047, .0150, .0148),
+        (-.035, .0135, .0132), (-.024, .0108, .0105),
+        (-.019, .0100, .0097), (-.016, .0125, .0122),
+        (-.013, .0125, .0122), (-.011, .0095, .0092),
+    ]
+    center_z = .0153
+
+    def profile(x, width, height, theta):
+        lobes = 1 + .035 * np.cos(6 * theta)
+        return np.column_stack((np.full(len(theta), x), width * lobes * np.cos(theta),
+                                center_z + height * lobes * np.sin(theta)))
+
+    handle = np.array([profile(x, w, h, angle) for x, w, h in stations])
+    _mesh_part(body, assets, "screwdriver_handle", handle,
+               [handle[i:i+3] for i in range(0, len(handle) - 2, 2)] + [handle[-2:]],
+               material="screwdriver_red", density=1050)
+
+    # Six rubber inserts follow the handle rather than floating over a capsule.
+    grip_x = np.array([-.073, -.070, -.060, -.047, -.035, -.025, -.022])
+    widths = np.interp(grip_x, np.array(stations)[:, 0], np.array(stations)[:, 1])
+    heights = np.interp(grip_x, np.array(stations)[:, 0], np.array(stations)[:, 2])
+    spans = [.055, .22, .24, .24, .22, .18, .045]
+    for index in range(6):
+        sections = []
+        for x, w, h, span in zip(grip_x, widths, heights, spans):
+            arc = index * np.pi / 3 + np.linspace(-span, span, 9)
+            outer = profile(x, w + .00018, h + .00018, arc)
+            inner = profile(x, w - .00025, h - .00025, arc[::-1])
+            sections.append(np.concatenate((outer, inner)))
+        _mesh_part(body, assets, f"screwdriver_grip_{index}", np.array(sections), [],
+                   material="grip_rubber")
+
+    collar = np.array([profile(x, r, r, angle) for x, r in
+                       [(-.012, .0086), (-.0105, .0089), (-.008, .0089), (-.0065, .0068)]])
+    _mesh_part(body, assets, "screwdriver_collar", collar, [collar],
+               material="grip_rubber", density=1100)
+    ferrule = np.array([profile(x, r, r, angle) for x, r in
+                        [(-.007, .0047), (-.0063, .0049), (-.0035, .0049), (-.0028, .0031)]])
+    _mesh_part(body, assets, "screwdriver_ferrule", ferrule, [ferrule], material="tool_steel")
+
+    # The working end is a forged, tapered flat blade, narrower than the handle.
+    _geom(body, "cylinder", size=[.0031, .0325], pos=[.0285, 0, center_z],
+          euler=[0, np.pi / 2, 0], rgba=None, material="driver_chrome",
+          contype=0, conaffinity=0, density=0, group=2)
+    _geom(body, "cylinder", size=[.0031, .0325], pos=[.0285, 0, center_z],
+          euler=[0, np.pi / 2, 0], group=3, density=7800)
+    blade = _rounded_sections([
+        (.059, .0029, center_z - .0029, center_z + .0029),
+        (.064, .0036, center_z - .0022, center_z + .0022),
+        (.070, .0038, center_z - .0013, center_z + .0013),
+        (.078, .0036, center_z - .00055, center_z + .00055),
+        (.081, .0034, center_z - .00045, center_z + .00045),
+    ], .00035)
+    _mesh_part(body, assets, "screwdriver_blade", blade,
+               [blade[i:i+2] for i in range(len(blade) - 1)], material="driver_chrome")
 
 
 def _rounded_sections(stations, corner_radius):
@@ -348,15 +387,96 @@ def _stapler(body, assets):
               rgba=[.22, .24, .27, 1], contype=0, conaffinity=0, density=0, group=2)
 
 
-def _tape_dispenser(body, _assets):
-    _geom(body, "box", size=[.054, .027, .008], pos=[0, 0, .008], rgba=BLACK)
-    for y in [-.021, .021]:
-        _geom(body, "box", size=[.022, .004, .017], pos=[-.023, y, .027], rgba=BLACK)
-    _ring(body, [-.021, 0, .046], .021, .007, .016, plane="xz", rgba=[.83, .60, .22, 1])
-    _geom(body, "box", size=[.018, .016, .0015], pos=[.018, 0, .050],
-          euler=[0, .56, 0], rgba=[.90, .78, .48, 1], contype="0", conaffinity="0", density="0")
-    _geom(body, "box", size=[.008, .025, .005], pos=[.044, 0, .026], rgba=BLACK)
-    _geom(body, "box", size=[.002, .023, .003], pos=[.049, 0, .034])
+def _tape_dispenser(body, assets):
+    pad = _rounded_sections([
+        (-.056, .016, .0005, .0025), (-.052, .023, 0, .003),
+        (.049, .023, 0, .003), (.055, .016, .0005, .0025),
+    ], .001)
+    _mesh_part(body, assets, "tape_pad", pad, [pad], material="grip_rubber", density=1100)
+    base = _rounded_sections([
+        (-.057, .014, .003, .008), (-.055, .021, .002, .012),
+        (-.050, .026, .002, .015), (-.039, .027, .002, .016),
+        (.033, .026, .002, .016), (.050, .024, .003, .015),
+        (.056, .019, .004, .012), (.058, .010, .005, .009),
+    ], .003)
+    _mesh_part(body, assets, "tape_base", base,
+               [base[i:i+3] for i in range(0, len(base) - 2, 2)] + [base[-2:]],
+               material="dispenser_shell", density=2300)
+
+    # Sculpted cheeks support the hollow spool and leave the reel bore visible.
+    stations = [
+        (-.055, .0015, .010, .022), (-.052, .0030, .009, .033),
+        (-.047, .0037, .009, .039), (-.040, .0040, .009, .041),
+        (-.031, .0040, .009, .039), (-.022, .0040, .009, .0365),
+        (-.013, .0040, .009, .033), (-.003, .0040, .009, .025),
+        (.012, .0040, .009, .020), (.027, .0040, .009, .022),
+        (.041, .0040, .009, .030), (.050, .0035, .010, .032),
+        (.055, .0020, .013, .029),
+    ]
+    for side in [-1, 1]:
+        cheek = _rounded_sections(stations, .0025)
+        cheek[:, :, 1] += side * .021
+        _mesh_part(body, assets, f"tape_cheek_{side}", cheek,
+                   [cheek[i:i+2] for i in range(len(cheek) - 1)],
+                   material="dispenser_shell", density=1100)
+
+    angle = np.linspace(0, 2 * np.pi, 96, endpoint=False)
+    center = np.array([-.022, .047])
+
+    def reel(name, profile, material, *, collision=False, density=950):
+        sections = np.array([[(center[0] + r * np.cos(a), y,
+                               center[1] + r * np.sin(a)) for r, y in profile] for a in angle])
+        hulls = [sections[np.arange(i, i+5) % len(angle)]
+                 for i in range(0, len(angle), 4)] if collision else []
+        _mesh_part(body, assets, name, sections, hulls,
+                   material=material, loop=True, density=density)
+
+    reel("tape_spool", [(.0085, -.020), (.0102, -.020), (.0109, -.0193),
+                        (.0109, .0193), (.0102, .020), (.0085, .020)],
+         "dispenser_shell", collision=True, density=1100)
+    reel("tape_paper_core", [(.0109, -.0168), (.0138, -.0168), (.0144, -.0162),
+                             (.0144, .0162), (.0138, .0168), (.0109, .0168)],
+         "tape_cardboard", collision=True, density=650)
+    reel("tape_roll", [(.0143, -.0159), (.0255, -.0159), (.0263, -.0154),
+                       (.0266, -.0146), (.0266, .0146), (.0263, .0154),
+                       (.0255, .0159), (.0143, .0159)],
+         "tape_amber", collision=True)
+    # Thin concentric seams suggest wound film at both cut faces of the roll.
+    for side in [-1, 1]:
+        for index, radius in enumerate([.016, .0185, .021, .0235, .025]):
+            y = side * .01596
+            reel(f"tape_winding_{side}_{index}",
+                 [(radius - .00007, y - .00004), (radius + .00007, y - .00004),
+                  (radius + .00007, y + .00004), (radius - .00007, y + .00004)],
+                 "tape_edge")
+
+    nose = _rounded_sections([
+        (.035, .014, .012, .021), (.043, .019, .012, .031),
+        (.050, .021, .013, .033), (.055, .020, .015, .032),
+    ], .002)
+    _mesh_part(body, assets, "tape_nose", nose,
+               [nose[i:i+2] for i in range(len(nose) - 1)],
+               material="dispenser_shell", density=1100)
+    plate = _rounded_sections([
+        (.048, .020, .032, .0333), (.050, .021, .032, .0343),
+        (.0547, .021, .032, .0343),
+    ], .0004)
+    _mesh_part(body, assets, "tape_cutter", plate, [plate], material="driver_chrome")
+    for index, y in enumerate(np.linspace(-.0195, .0195, 19)):
+        tooth = np.array([[(x, y - .00095, .0341), (x, y + .00095, .0341),
+                           (x, y, .0362)] for x in [.0538, .0547]])
+        _mesh_part(body, assets, f"tape_tooth_{index}", tooth, [], material="driver_chrome")
+
+    # Analytic tangent joins the wound reel to the cutting edge without a floating strip.
+    end = np.array([.0538, .0354])
+    delta = end - center
+    tangent_angle = np.arctan2(delta[1], delta[0]) + np.arccos(.0266 / np.linalg.norm(delta))
+    start = center + .0266 * np.array([np.cos(tangent_angle), np.sin(tangent_angle)])
+    strip = _rounded_sections([
+        (x, .015, z - .00012, z + .00012)
+        for x, z in np.linspace(start, end, 4)
+    ], .00008)
+    _mesh_part(body, assets, "tape_feed", strip, [strip], material="tape_film", density=950)
 
 
 BUILDERS = {"cup": _cup, "spoon": _spoon, "wrench": _wrench, "screwdriver": _screwdriver,
@@ -396,6 +516,18 @@ def build_scene(config: dict, layout: dict, output: Path) -> Path:
                   specular=".035", shininess=".08")
     ET.SubElement(assets, "material", name="stapler_steel", rgba=".60 .64 .70 1",
                   specular=".47", shininess=".50")
+    for name, rgba, specular, shininess in [
+        ("screwdriver_red", ".68 .035 .023 1", ".25", ".32"),
+        ("grip_rubber", ".035 .039 .044 1", ".045", ".08"),
+        ("driver_chrome", ".66 .69 .73 1", ".65", ".70"),
+        ("dispenser_shell", ".065 .075 .086 1", ".28", ".38"),
+        ("tape_cardboard", ".66 .52 .34 1", ".035", ".08"),
+        ("tape_amber", ".79 .63 .34 1", ".30", ".48"),
+        ("tape_edge", ".68 .53 .28 1", ".12", ".25"),
+        ("tape_film", ".85 .73 .47 1", ".42", ".58"),
+    ]:
+        ET.SubElement(assets, "material", name=name, rgba=rgba,
+                      specular=specular, shininess=shininess)
     visual = ET.SubElement(root, "visual")
     ET.SubElement(visual, "global", offwidth="1280", offheight="960")
     ET.SubElement(visual, "headlight", ambient=".25 .25 .25", diffuse=".35 .35 .35")

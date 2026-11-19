@@ -167,6 +167,31 @@ def test_cup_cavity_handle_and_stapler_gap(object_ray):
     assert 0 < object_ray("stapler", [.039, 0, .020], down) < .010
 
 
+def test_screwdriver_tapered_blade_and_handle(object_ray):
+    down = [0, 0, -1]
+    handle = object_ray("screwdriver", [-.050, 0, .040], down)
+    shaft = object_ray("screwdriver", [.040, 0, .040], down)
+    tip = object_ray("screwdriver", [.079, 0, .040], down)
+    assert 0 < handle < shaft < tip < .040
+    assert shaft - handle > .009
+    assert tip - shaft > .002
+    # The thin blade clears a horizontal ray that still hits the round shaft.
+    assert object_ray("screwdriver", [.079, -.025, .0173], [0, 1, 0]) == -1
+    assert 0 < object_ray("screwdriver", [.040, -.025, .0173], [0, 1, 0]) < .025
+
+
+def test_tape_bore_reel_and_feed_clearance(object_ray):
+    across = [0, 1, 0]
+    assert object_ray("tape_dispenser", [-.022, -.045, .047], across) == -1
+    assert 0 < object_ray("tape_dispenser", [-.0095, -.045, .047], across) < .030
+    assert 0 < object_ray("tape_dispenser", [-.022, -.045, .068], across) < .030
+    # The feed spans an open gap between the reel and the cutting pedestal.
+    feed = object_ray("tape_dispenser", [.023, 0, .085], [0, 0, -1])
+    assert .025 < feed < .040
+    assert object_ray("tape_dispenser", [.018, -.045, .028], across) == -1
+    assert 0 < object_ray("tape_dispenser", [.049, -.045, .029], across) < .045
+
+
 def test_evaluator_accepts_complete_stable_correct_trays(simulation):
     config, model, data, controller = settled(simulation)
     put_in_trays(config, model, data, controller)

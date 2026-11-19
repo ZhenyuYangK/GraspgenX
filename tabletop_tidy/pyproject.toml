@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tabletop-tidy"
+version = "0.1.0"
+description = "Panda tabletop semantic sorting with MuJoCo, SAM3 and GraspGenX"
+requires-python = ">=3.10"
+dependencies = ["mujoco>=3.2,<4", "numpy>=1.26,<3", "opencv-python-headless>=4.8", "pillow>=10"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+
+[project.scripts]
+tabletop-tidy = "tabletop_tidy.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

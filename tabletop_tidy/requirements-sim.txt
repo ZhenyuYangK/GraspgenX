@@ -1,0 +1,6 @@
+# Direct dependency versions used by the verified simulation baseline.
+mujoco==3.12.0
+numpy==2.2.6
+opencv-python-headless==4.12.0.88
+pillow==12.3.0
+pytest==8.4.2

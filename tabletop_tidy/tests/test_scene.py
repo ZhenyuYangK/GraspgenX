@@ -14,6 +14,7 @@ from tabletop_tidy.scene import (
 )
 from tabletop_tidy.control import PandaController
 from tabletop_tidy.camera import RGBDCamera
+from tabletop_tidy.sorting import ContactCheck, operate_lid, park_arm, tune_gripper
 
 
 @pytest.fixture(scope="module")
@@ -272,6 +273,34 @@ def test_unpowered_storage_box_lids_settle_at_the_hinge_limits(tmp_path):
         for name in names:
             joint = model.joint(name)
             np.testing.assert_allclose(data.qpos[joint.qposadr], joint.range[int(lids_open)], atol=.02)
+
+
+def test_panda_opens_and_closes_all_storage_boxes_by_their_handles(tmp_path):
+    config = load_config()
+    scene = build_scene(config, sample_layout(config, 42), tmp_path / "passive.xml", powered_lids=False)
+    model = mujoco.MjModel.from_xml_path(str(scene))
+    tune_gripper(model)
+    data = mujoco.MjData(model)
+    initialize(model, data, lids_open=False)
+    arm = PandaController(model, data)
+    arm.hold(1.5)
+    names = {category: f"storage_box_lid_{category}" for category in config["trays"]}
+    joints = [model.joint(name) for name in names.values()]
+    angle_indices = [joint.qposadr[0] for joint in joints]
+
+    for opening in (True, False):
+        if not opening:
+            park_arm(arm)
+            put_in_trays(config, model, data, arm)
+            assert evaluate(model, data, config)["success"]
+        for category, name in names.items():
+            arm.on_step = ContactCheck(model, data, name).check
+            operate_lid(arm, category, opening)
+        arm.on_step = None
+        np.testing.assert_allclose(data.qpos[angle_indices],
+                                   [joint.range[int(opening)] for joint in joints], atol=np.deg2rad(3))
+
+    assert evaluate(model, data, config)["success"]
 
 
 def test_evaluator_rejects_object_protruding_above_box(simulation):

@@ -90,42 +90,67 @@ def operate_lid(arm, category, opening):
     name = f"storage_box_lid_{category}"
     joint = model.joint(name)
     angle_index = joint.qposadr[0]
-    anchor = data.xanchor[joint.id].copy()
-    handle = "handle" if opening else "closing_handle"
-    center = data.geom(f"{name}_{handle}").xpos.copy()
-    offset = center - anchor
     start = float(data.qpos[angle_index])
-    finish = np.deg2rad(52 if opening else 29)
+    stop = joint.range[int(opening)]
+    if abs(start - stop) <= np.deg2rad(3):
+        return float(np.rad2deg(start))
 
-    def orientation(angle):
-        if opening:
-            return DOWNWARD
-        pitch = np.clip(np.rad2deg(angle) - 84, -70, -12)
-        return _roll(np.deg2rad(pitch)) @ _yaw(np.pi / 2) @ DOWNWARD
+    handle = model.geom(f"{name}_handle").id
+    fingers = {model.body(side).id for side in ("left_finger", "right_finger")}
 
-    rotation = orientation(start)
-    clearance = -(.043 if opening else .055) * rotation[:, 2]
-    arm.move(np.array([.42, .10, .30]), 1.0, f"{category} lid clearance")
-    move_joint_path(arm, center + clearance, rotation, 1.4, f"{category} lid approach")
+    def fingers_on_handle():
+        touching = set()
+        for contact in data.contact:
+            if contact.geom1 == handle:
+                touching.add(model.geom_bodyid[contact.geom2])
+            elif contact.geom2 == handle:
+                touching.add(model.geom_bodyid[contact.geom1])
+        return touching & fingers
+
+    anchor = data.xanchor[joint.id].copy()
+    center = data.geom_xpos[handle].copy()
+    offset = center - anchor
+    # Move past the passive lid's over-center point before releasing it.
+    if opening:
+        release_angle = 55
+        approach_roll = -40 if category == "kitchen" else -35
+        release_roll = -45
+        skew_degrees = -25 if category == "kitchen" else 0
+    else:
+        release_angle = 22
+        approach_roll, release_roll = 0, -40
+        skew_degrees = {"kitchen": -25, "tools": 0, "office": 40}[category]
+
+    # Skew the approach along the bar to keep the near and far boxes in reach.
+    # This rotation preserves the finger closing axis across the cylinder.
+    skew = np.deg2rad(skew_degrees)
+    c, s = np.cos(skew), np.sin(skew)
+    grip = DOWNWARD @ np.array([[c, 0., s], [0., 1., 0.], [-s, 0., c]])
+    finish, first_roll, last_roll = np.deg2rad([release_angle, approach_roll, release_roll])
+
+    rotation = _roll(first_roll) @ grip
+    clearance = np.array([.42, .10, .30])
+    arm.move(clearance, 1.0, f"{category} lid clearance")
+    move_joint_path(arm, center - .047 * rotation[:, 2], rotation, 1.4, f"{category} lid approach")
     arm.move(center, .8, f"{category} lid handle", rotation=rotation)
     arm.close()
-    if len(arm.finger_contacts(name)) != 2:
+    if fingers_on_handle() != fingers:
         raise RuntimeError(f"The gripper missed the {category} lid handle")
 
-    for angle in np.linspace(start, finish, 13)[1:]:
-        rotation = orientation(angle)
+    for fraction in np.linspace(0., 1., 13)[1:]:
+        angle = start + fraction * (finish - start)
+        rotation = _roll(first_roll + fraction * (last_roll - first_roll)) @ grip
         arm.move(anchor + _roll(angle - start) @ offset, .24, f"{category} lid turn",
-                 tolerance=.020, rotation=rotation)
-        if abs(data.qpos[angle_index] - angle) > np.deg2rad(14):
+                 tolerance=.012, rotation=rotation)
+        if abs(data.qpos[angle_index] - angle) > np.deg2rad(8) or not fingers_on_handle():
             raise RuntimeError(f"The {category} lid slipped out of the gripper")
 
     arm.open()
-    retreat = np.array([0., -.12, .10]) if opening else -.105 * rotation[:, 2]
-    arm.move(arm.tcp_position() + retreat, .9, f"{category} lid retreat", rotation=rotation)
-    arm.move(np.array([.42, .10, .30]), 1.0, f"{category} lid clearance")
+    arm.move(arm.tcp_position() - .060 * rotation[:, 2], .9, f"{category} lid retreat", rotation=rotation)
+    arm.move(clearance, 1.0, f"{category} lid clearance")
     arm.hold(1.8)
     angle = float(data.qpos[angle_index])
-    if abs(angle - joint.range[int(opening)]) > np.deg2rad(3):
+    if abs(angle - stop) > np.deg2rad(3):
         raise RuntimeError(f"The {category} lid stopped at {np.rad2deg(angle):.1f}°")
     return float(np.rad2deg(angle))
 

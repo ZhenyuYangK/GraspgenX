@@ -116,23 +116,31 @@ def test_camera_depth_roundtrip_and_object_visibility(simulation):
             assert visible.sum() > 40, obj["name"]
 
 
-@pytest.mark.parametrize("geom_group", [2, 3], ids=["rendering", "collision"])
-def test_spoon_bowl_and_wrench_openings(simulation, geom_group):
+@pytest.fixture(params=[2, 3], ids=["rendering", "collision"])
+def object_ray(simulation, request):
     _, model = simulation
     data = mujoco.MjData(model)
     initialize(model, data)
     groups = np.zeros(6, dtype=np.uint8)
-    groups[geom_group] = 1
+    groups[request.param] = 1
 
-    def ray_distance(name, x, y):
+    def ray_distance(name, local_origin, local_direction):
         body = model.body(name).id
         rotation = data.xmat[body].reshape(3, 3)
-        origin = data.xpos[body] + rotation @ [x, y, .030]
+        origin = data.xpos[body] + rotation @ local_origin
+        direction = rotation @ local_direction
         hit = np.array([-1], dtype=np.int32)
-        distance = mujoco.mj_ray(model, data, origin, -rotation[:, 2], groups, False, -1, hit)
+        distance = mujoco.mj_ray(model, data, origin, direction, groups, False, -1, hit)
         if distance >= 0:
             assert model.geom_bodyid[hit[0]] == body
         return distance
+
+    return ray_distance
+
+
+def test_spoon_bowl_and_wrench_openings(object_ray):
+    def ray_distance(name, x, y):
+        return object_ray(name, [x, y, .030], [0, 0, -1])
 
     floor = ray_distance("spoon", .042, .001)
     wall = ray_distance("spoon", .066, .002)
@@ -143,6 +151,20 @@ def test_spoon_bowl_and_wrench_openings(simulation, geom_group):
     assert ray_distance("wrench", .071, .003) == -1  # open jaw gap
     assert 0 < ray_distance("wrench", -.078, .001) < .030
     assert 0 < ray_distance("wrench", .060, .015) < .030
+
+
+def test_cup_cavity_handle_and_stapler_gap(object_ray):
+    down, across = [0, 0, -1], [0, 1, 0]
+    floor = object_ray("cup", [0, 0, .095], down)
+    rim = object_ray("cup", [.035, .002, .095], down)
+    assert 0 < rim < .02
+    assert .065 < floor - rim < .085
+    assert object_ray("cup", [.051, -.020, .044], across) == -1
+    assert 0 < object_ray("cup", [.066, -.020, .044], across) < .020
+
+    assert object_ray("stapler", [.039, -.025, .020], across) == -1
+    assert 0 < object_ray("stapler", [.039, -.025, .032], across) < .025
+    assert 0 < object_ray("stapler", [.039, 0, .020], down) < .010
 
 
 def test_evaluator_accepts_complete_stable_correct_trays(simulation):

@@ -17,7 +17,6 @@ HOME = np.array([-1., 0., 0., -1.57079, 0., 1.57079, -.7853, .04, .04])
 SILVER = (.63, .67, .72, 1.)
 BLACK = (.08, .09, .11, 1.)
 RED = (.77, .055, .035, 1.)
-CREAM = (.90, .86, .70, 1.)
 
 
 def _s(values):
@@ -121,7 +120,7 @@ def _loft_faces(sections, *, loop=False):
     return faces
 
 
-def _mesh_part(body, assets, name, sections, collision_parts, *, material, loop=False):
+def _mesh_part(body, assets, name, sections, collision_parts, *, material, loop=False, density=7800):
     vertices = _s(sections.ravel())
     faces = " ".join(str(i) for face in _loft_faces(sections, loop=loop) for i in face)
     ET.SubElement(assets, "mesh", name=name, vertex=vertices, face=faces, smoothnormal="true")
@@ -131,13 +130,50 @@ def _mesh_part(body, assets, name, sections, collision_parts, *, material, loop=
     for index, part in enumerate(collision_parts):
         hull = f"{name}_collision_{index}"
         ET.SubElement(assets, "mesh", name=hull, vertex=_s(part.ravel()))
-        _geom(body, "mesh", mesh=hull, density="7800", group="3")
+        _geom(body, "mesh", mesh=hull, density=density, group="3")
 
 
-def _cup(body, _assets):
-    _geom(body, "cylinder", pos=[0, 0, .004], size=[.033, .004], rgba=CREAM)
-    _ring(body, [0, 0, .042], .030, .003, .035, rgba=CREAM)
-    _ring(body, [.044, 0, .040], .022, .004, .005, plane="xz", rgba=CREAM, n=20)
+def _cup(body, assets):
+    angle = np.linspace(0, 2 * np.pi, 60, endpoint=False)
+    circle = np.column_stack((np.cos(angle), np.sin(angle)))
+    # Revolve the ceramic profile from the recessed underside to the inner floor.
+    foot = [(.005, .0025), (.021, .0025), (.023, .0018), (.024, .0005),
+            (.025, 0), (.027, 0), (.028, .0009), (.0285, .0036)]
+    wall = [(.030, .005), (.032, .0075), (.034, .012), (.035, .021),
+            (.0357, .042), (.0369, .065), (.0374, .080), (.0374, .082),
+            (.0370, .0834), (.0360, .0842), (.0348, .0844), (.0336, .0840),
+            (.0329, .0830), (.0327, .0817), (.0324, .066), (.0312, .044),
+            (.0304, .024), (.0298, .017), (.0285, .013), (.0257, .0103)]
+    floor = [(.022, .0093), (.012, .0090), (.005, .0090)]
+    shell = np.array([np.column_stack((radius * circle, np.full(len(angle), z)))
+                      for radius, z in foot + wall + floor])
+
+    # Short wedges leave the cavity open. A flat circular contact supports the foot.
+    wall_sections = shell[len(foot):len(foot) + len(wall)]
+    collision = [wall_sections[:, np.arange(start, start + 4) % len(angle)]
+                 for start in range(0, len(angle), 3)]
+    collision.append(shell[[len(foot) - 1, len(foot) + 1, -3], ::3])
+    _mesh_part(body, assets, "cup_shell", shell, collision,
+               material="cup_glaze", density=2350)
+    _geom(body, "cylinder", size=[.027, .0018], pos=[0, 0, .0018],
+          group="3", density=2350)
+
+    # The C-shaped handle widens into the wall at both roots.
+    arc = np.linspace(-np.pi / 2, np.pi / 2, 25)
+    cos_arc, sin_arc = np.cos(arc), np.sin(arc)
+    centers = np.column_stack((.033 + .033 * cos_arc, np.zeros(len(arc)),
+                               .044 + .023 * sin_arc))
+    normals = np.column_stack((cos_arc / .033, np.zeros(len(arc)), sin_arc / .023))
+    normals /= np.linalg.norm(normals, axis=1, keepdims=True)
+    section_angle = angle[::4]
+    thickness = .0048 + .0015 * sin_arc**4
+    width = .0060 + .0020 * sin_arc**4
+    handle = (centers[:, None, :]
+              + (thickness[:, None] * np.cos(section_angle))[:, :, None] * normals[:, None, :]
+              + (width[:, None] * np.sin(section_angle))[:, :, None] * [0, 1, 0])
+    _mesh_part(body, assets, "cup_handle", handle,
+               [handle[start:start + 5] for start in range(0, len(arc) - 1, 4)],
+               material="cup_glaze", density=2350)
 
 
 def _spoon(body, assets):
@@ -242,13 +278,74 @@ def _screwdriver(body, _assets):
     _geom(body, "box", size=[.008, .008, .003], pos=[.072, 0, .018])
 
 
-def _stapler(body, _assets):
-    _geom(body, "box", size=[.053, .022, .007], pos=[0, 0, .007], rgba=BLACK)
-    _geom(body, "box", size=[.049, .018, .004], pos=[-.001, 0, .019])
-    _geom(body, "box", size=[.050, .021, .012], pos=[-.002, 0, .035],
-          euler=[0, .16, 0], rgba=[.055, .19, .43, 1])
-    _geom(body, "cylinder", size=[.016, .022], pos=[-.038, 0, .027], euler=[np.pi/2, 0, 0], rgba=BLACK)
-    _geom(body, "box", size=[.006, .02, .008], pos=[.043, 0, .027])
+def _rounded_sections(stations, corner_radius):
+    """Rounded rectangular sections for a part whose silhouette varies along x."""
+    angle = np.linspace(0, np.pi / 2, 5) + (np.pi / 2) * np.arange(4)[:, None]
+    arcs = np.stack((np.cos(angle), np.sin(angle)), axis=-1)
+    sections = []
+    for x, width, bottom, top in stations:
+        r = min(corner_radius, width * .8, (top - bottom) * .4)
+        corners = np.array([(width - r, top - r), (-width + r, top - r),
+                            (-width + r, bottom + r), (width - r, bottom + r)])
+        yz = (corners[:, None, :] + r * arcs).reshape(-1, 2)
+        sections.append(np.column_stack((np.full(len(yz), x), yz)))
+    return np.array(sections)
+
+
+def _stapler(body, assets):
+    # Each station gives x, half width, and the lower and upper heights.
+    pad = _rounded_sections([
+        (-.051, .009, .0007, .0021), (-.048, .015, .0002, .0026),
+        (-.043, .018, 0, .003), (.044, .018, 0, .003),
+        (.049, .015, .0002, .0026), (.052, .009, .0007, .0021),
+    ], .001)
+    _mesh_part(body, assets, "stapler_pad", pad, [], material="stapler_rubber")
+    _geom(body, "box", size=[.0435, .017, .0015], pos=[.0005, 0, .0015],
+          group=3, density=1100)
+
+    # The front of the magazine is raised above the clinching plate.
+    parts = [
+        ("base", "stapler_base", 2100, .0026, [
+            (-.054, .008, .0034, .0064), (-.052, .014, .0024, .0086),
+            (-.047, .018, .002, .0100), (-.040, .019, .002, .0104),
+            (.041, .019, .002, .0104), (.048, .0175, .0023, .0099),
+            (.052, .014, .0031, .0086), (.054, .008, .0042, .0072),
+        ]),
+        ("hinge", "stapler_base", 2100, .003, [
+            (-.050, .008, .008, .024), (-.047, .0135, .008, .030),
+            (-.041, .0145, .008, .0315), (-.033, .014, .008, .028),
+            (-.026, .011, .008, .023), (-.022, .008, .008, .016),
+        ]),
+        ("magazine", "stapler_steel", 3100, .0012, [
+            (-.046, .009, .019, .025), (-.040, .0115, .0195, .028),
+            (-.018, .0120, .0215, .030), (.033, .0123, .027, .035),
+            (.047, .0118, .0285, .0365), (.051, .010, .030, .0363),
+        ]),
+        ("cover", "stapler_blue", 850, .0045, [
+            (-.052, .007, .027, .035), (-.049, .012, .024, .038),
+            (-.043, .015, .024, .042), (-.032, .016, .026, .045),
+            (-.010, .0165, .029, .048), (.012, .018, .031, .0505),
+            (.031, .0185, .0325, .051), (.043, .0178, .0335, .0495),
+            (.050, .0145, .035, .0465), (.053, .010, .0365, .0435),
+            (.054, .005, .038, .0415),
+        ]),
+        ("anvil", "stapler_steel", 7800, .0008, [
+            (.024, .005, .0092, .0115), (.026, .008, .0092, .013),
+            (.030, .009, .0092, .0132), (.047, .009, .0092, .0132),
+            (.050, .007, .0092, .0125), (.051, .0045, .0092, .0113),
+        ]),
+    ]
+    for name, material, density, radius, stations in parts:
+        sections = _rounded_sections(stations, radius)
+        _mesh_part(body, assets, f"stapler_{name}", sections, [sections],
+                   material=material, density=density)
+
+    _geom(body, "cylinder", pos=[-.041, 0, .0185], size=[.0042, .0148],
+          euler=[np.pi / 2, 0, 0], rgba=None, material="stapler_steel",
+          contype=0, conaffinity=0, density=0, group=2)
+    for x in [.036, .042]:
+        _geom(body, "capsule", size=[.00075], fromto=[x, -.0055, .01255, x, .0055, .01255],
+              rgba=[.22, .24, .27, 1], contype=0, conaffinity=0, density=0, group=2)
 
 
 def _tape_dispenser(body, _assets):
@@ -289,6 +386,16 @@ def build_scene(config: dict, layout: dict, output: Path) -> Path:
                   specular=".40", shininess=".42")
     ET.SubElement(assets, "material", name="tool_steel", rgba=".46 .49 .53 1",
                   specular=".27", shininess=".28")
+    ET.SubElement(assets, "material", name="cup_glaze", rgba=".91 .85 .70 1",
+                  specular=".48", shininess=".58")
+    ET.SubElement(assets, "material", name="stapler_blue", rgba=".055 .20 .43 1",
+                  specular=".32", shininess=".43")
+    ET.SubElement(assets, "material", name="stapler_base", rgba=".09 .10 .12 1",
+                  specular=".13", shininess=".20")
+    ET.SubElement(assets, "material", name="stapler_rubber", rgba=".045 .047 .052 1",
+                  specular=".035", shininess=".08")
+    ET.SubElement(assets, "material", name="stapler_steel", rgba=".60 .64 .70 1",
+                  specular=".47", shininess=".50")
     visual = ET.SubElement(root, "visual")
     ET.SubElement(visual, "global", offwidth="1280", offheight="960")
     ET.SubElement(visual, "headlight", ambient=".25 .25 .25", diffuse=".35 .35 .35")

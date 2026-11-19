@@ -116,6 +116,35 @@ def test_camera_depth_roundtrip_and_object_visibility(simulation):
             assert visible.sum() > 40, obj["name"]
 
 
+@pytest.mark.parametrize("geom_group", [2, 3], ids=["rendering", "collision"])
+def test_spoon_bowl_and_wrench_openings(simulation, geom_group):
+    _, model = simulation
+    data = mujoco.MjData(model)
+    initialize(model, data)
+    groups = np.zeros(6, dtype=np.uint8)
+    groups[geom_group] = 1
+
+    def ray_distance(name, x, y):
+        body = model.body(name).id
+        rotation = data.xmat[body].reshape(3, 3)
+        origin = data.xpos[body] + rotation @ [x, y, .030]
+        hit = np.array([-1], dtype=np.int32)
+        distance = mujoco.mj_ray(model, data, origin, -rotation[:, 2], groups, False, -1, hit)
+        if distance >= 0:
+            assert model.geom_bodyid[hit[0]] == body
+        return distance
+
+    floor = ray_distance("spoon", .042, .001)
+    wall = ray_distance("spoon", .066, .002)
+    assert 0 < wall < floor < .030
+    assert floor - wall > .004
+
+    assert ray_distance("wrench", -.063, 0) == -1  # box-end bore
+    assert ray_distance("wrench", .071, .003) == -1  # open jaw gap
+    assert 0 < ray_distance("wrench", -.078, .001) < .030
+    assert 0 < ray_distance("wrench", .060, .015) < .030
+
+
 def test_evaluator_accepts_complete_stable_correct_trays(simulation):
     config, model, data, controller = settled(simulation)
     put_in_trays(config, model, data, controller)

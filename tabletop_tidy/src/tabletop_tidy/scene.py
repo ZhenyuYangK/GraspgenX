@@ -1,7 +1,7 @@
 """Procedural object prototypes and reproducible, collision-free initial layouts.
 
-All six objects are free rigid bodies. Primitive compounds keep the cup and
-tape ring hollow for contact simulation; no object is attached to the robot.
+All six objects are free rigid bodies. Compound collision shapes preserve
+the hollow parts of the objects.
 Lengths below are explicit prototype dimensions, in metres.
 """
 from __future__ import annotations
@@ -73,8 +73,10 @@ def sample_layout(config: dict, seed: int) -> dict:
 
 
 def _geom(body, kind, *, size=None, pos=None, rgba=SILVER, **extra):
-    attrs = {"type": kind, "rgba": _s(rgba), "density": "450", "condim": "4",
+    attrs = {"type": kind, "density": "450", "condim": "4",
              "friction": "1.2 .01 .001"}
+    if rgba is not None:
+        attrs["rgba"] = _s(rgba)
     if size is not None:
         attrs["size"] = _s(size)
     if pos is not None:
@@ -100,36 +102,147 @@ def _ring(body, center, radius, radial_half, axial_half, plane="xy", rgba=SILVER
                   pos=p, euler=[0, -angle, 0], rgba=rgba)
 
 
-def _cup(body):
+def _loft_faces(sections, *, loop=False):
+    """Triangulate a surface between cross sections with matching vertices."""
+    count, width = sections.shape[:2]
+    faces = []
+    for section in range(count if loop else count - 1):
+        start = section * width
+        end = (section + 1) % count * width
+        for index in range(width):
+            following = (index + 1) % width
+            faces.extend([(start + index, start + following, end + following),
+                          (start + index, end + following, end + index)])
+    if not loop:
+        end = (count - 1) * width
+        for index in range(1, width - 1):
+            faces.extend([(0, index + 1, index),
+                          (end, end + index, end + index + 1)])
+    return faces
+
+
+def _mesh_part(body, assets, name, sections, collision_parts, *, material, loop=False):
+    vertices = _s(sections.ravel())
+    faces = " ".join(str(i) for face in _loft_faces(sections, loop=loop) for i in face)
+    ET.SubElement(assets, "mesh", name=name, vertex=vertices, face=faces, smoothnormal="true")
+    _geom(body, "mesh", mesh=name, rgba=None, material=material,
+          contype="0", conaffinity="0", density="0", group="2")
+    # MuJoCo computes a convex hull for each collision mesh without faces.
+    for index, part in enumerate(collision_parts):
+        hull = f"{name}_collision_{index}"
+        ET.SubElement(assets, "mesh", name=hull, vertex=_s(part.ravel()))
+        _geom(body, "mesh", mesh=hull, density="7800", group="3")
+
+
+def _cup(body, _assets):
     _geom(body, "cylinder", pos=[0, 0, .004], size=[.033, .004], rgba=CREAM)
     _ring(body, [0, 0, .042], .030, .003, .035, rgba=CREAM)
     _ring(body, [.044, 0, .040], .022, .004, .005, plane="xz", rgba=CREAM, n=20)
 
 
-def _spoon(body):
-    _geom(body, "capsule", size=[.012], fromto=[-.061, 0, .013, .023, 0, .013])
-    _geom(body, "ellipsoid", size=[.030, .021, .012], pos=[.042, 0, .013])
-    # A darker inset makes the shallow bowl legible without a texture label.
-    _geom(body, "ellipsoid", size=[.022, .014, .002], pos=[.044, 0, .024],
-          rgba=[.40, .44, .48, 1], contype="0", conaffinity="0", density="0")
+def _spoon(body, assets):
+    angle = np.linspace(0, 2 * np.pi, 48, endpoint=False)
+    c, s = np.cos(angle), np.sin(angle)
+    radius = np.array([.14, .34, .55, .73, .87, .96, 1.])[:, None]
+    x = .042 + .030 * radius * c
+    y = .019 * radius * s * (1 - .14 * radius * c)
+    depth = np.maximum(0, (radius**2 - .14**2) / (1 - .14**2))
+    surface = .0018 + (.011 - .0015 * c) * depth
+    bottom = np.stack((x, y, surface - .0015), axis=-1)
+    top = np.stack((x, y, surface), axis=-1)
+    rim = (top[-1] + bottom[-1]) / 2
+    rim[:, :2] += np.column_stack((c, s)) * .0004
+    bowl = np.concatenate((bottom, rim[None], top[::-1]))
+
+    # The center patch and short radial wedges follow the bowl on both sides.
+    bowl_collision = [np.concatenate((bottom[0], top[0]))[::2]]
+    for inner, outer in zip((0, 2, 4), (2, 4, 6)):
+        for start in range(0, len(angle), 4):
+            arc = np.arange(start, start + 5, 2) % len(angle)
+            bowl_collision.append(np.concatenate((bottom[[inner, outer]][:, arc],
+                                                  top[[inner, outer]][:, arc])))
+    _mesh_part(body, assets, "spoon_bowl", bowl, bowl_collision, material="flatware_steel")
+
+    # Axial stations give the handle a rounded butt and a raised, narrower neck.
+    stations = [
+        (-.073, .0004, .0017, .0003), (-.072, .0030, .0017, .0011),
+        (-.069, .0061, .0017, .0016), (-.063, .0072, .0018, .0017),
+        (-.050, .0068, .0028, .0017), (-.033, .0054, .0044, .0016),
+        (-.015, .0040, .0069, .0015), ( .000, .0034, .0091, .0015),
+        ( .010, .0041, .0119, .0014), ( .012, .0043, .0119, .0013),
+        ( .015, .0046, .0105, .0012), ( .019, .0029, .0080, .0007),
+    ]
+    angle = np.linspace(0, 2 * np.pi, 16, endpoint=False)
+    handle = np.array([np.column_stack((np.full(len(angle), x), width * np.cos(angle),
+                                        z + height * np.sin(angle)))
+                       for x, width, z, height in stations])
+    _mesh_part(body, assets, "spoon_handle", handle,
+               [handle[start:end] for start, end in zip((0, 3, 5, 7), (4, 6, 8, len(handle)))],
+               material="flatware_steel")
 
 
-def _wrench(body):
-    _geom(body, "box", size=[.051, .012, .013], pos=[-.004, 0, .013])
-    _ring(body, [-.064, 0, .013], .017, .005, .013, n=12)
-    _geom(body, "box", size=[.013, .025, .013], pos=[.049, 0, .013])
-    for side in [-1, 1]:
-        _geom(body, "box", size=[.013, .007, .013], pos=[.066, side*.019, .013])
+def _wrench_head_sections(outer, inner, height):
+    """Bevel the outer edge and the working faces of a wrench head."""
+    radial = outer - inner
+    bevel = .00065 * radial / np.linalg.norm(radial, axis=1, keepdims=True)
+    columns = [(outer, height - .00065), (outer, .00065), (outer - bevel, 0),
+               (inner + bevel, 0), (inner, .00065), (inner, height - .00065),
+               (inner + bevel, height), (outer - bevel, height)]
+    return np.stack([np.column_stack((xy, np.full(len(xy), z))) for xy, z in columns], axis=1)
 
 
-def _screwdriver(body):
+def _wrench(body, assets):
+    # A 12-point box end. Short convex sections leave the bore open.
+    angle = np.linspace(0, 2 * np.pi, 48, endpoint=False)
+    circle = np.column_stack((np.cos(angle), np.sin(angle)))
+    points = circle[::2] * np.tile([.0118, .0100], 12)[:, None]
+    inner = np.stack((points, (points + np.roll(points, -1, axis=0)) / 2), axis=1).reshape(-1, 2)
+    center = np.array([-.063, 0])
+    ring = _wrench_head_sections(center + .019 * circle, center + inner, .009)
+    _mesh_part(body, assets, "wrench_box_end", ring,
+               [ring[[i, (i+1) % len(ring), (i+2) % len(ring)]] for i in range(0, len(ring), 2)],
+               material="tool_steel", loop=True)
+
+    # Parallel jaws transition to the relieved throat, rotated 15 degrees from the handle.
+    jaw = np.array([[.018, .009], [-.002, .009], [-.009, .003],
+                    [-.009, -.003], [-.002, -.009], [.018, -.009]])
+    inner = np.concatenate([np.linspace(a, b, 7, endpoint=False) for a, b in zip(jaw, jaw[1:])]
+                           + [jaw[-1:]])
+    angle = np.unwrap(np.arctan2(inner[:, 1], inner[:, 0]))
+    angle = np.interp(angle, [angle[0], angle[-1]], np.deg2rad([34, 326]))
+    outer = np.column_stack((.022 * np.cos(angle), .022 * np.sin(angle)))
+    c, s = np.cos(np.pi / 12), np.sin(np.pi / 12)
+    rotation = np.array([[c, s], [-s, c]])
+    center = np.array([.060, 0])
+    head = _wrench_head_sections(center + outer @ rotation, center + inner @ rotation, .008)
+    _mesh_part(body, assets, "wrench_open_end", head,
+               [head[i:i+4] for i in range(0, len(head) - 1, 3)], material="tool_steel")
+
+    # The forged shank flares and thickens where it meets each head.
+    stations = [(-.050, .0100, .002, .0078), (-.041, .0097, .0017, .0072),
+                (-.029, .0075, .0017, .0064), ( .010, .0074, .0017, .0064),
+                ( .029, .0085, .0015, .0069), ( .042, .0100, .0013, .0070),
+                ( .049, .0115, .0013, .0070)]
+    handle = []
+    for x, width, bottom, top in stations:
+        bevel = .0009
+        profile = [(width, bottom + bevel), (width, top - bevel), (width - bevel, top),
+                   (-width + bevel, top), (-width, top - bevel), (-width, bottom + bevel),
+                   (-width + bevel, bottom), (width - bevel, bottom)]
+        handle.append([(x, y, z) for y, z in profile])
+    handle = np.array(handle)
+    _mesh_part(body, assets, "wrench_handle", handle,
+               [handle[i:i+2] for i in range(len(handle) - 1)], material="tool_steel")
+
+
+def _screwdriver(body, _assets):
     _geom(body, "capsule", size=[.017], fromto=[-.064, 0, .018, -.018, 0, .018], rgba=RED)
     _geom(body, "cylinder", size=[.012, .008], pos=[-.01, 0, .018], euler=[0, np.pi/2, 0], rgba=BLACK)
     _geom(body, "capsule", size=[.005], fromto=[-.005, 0, .018, .066, 0, .018])
     _geom(body, "box", size=[.008, .008, .003], pos=[.072, 0, .018])
 
 
-def _stapler(body):
+def _stapler(body, _assets):
     _geom(body, "box", size=[.053, .022, .007], pos=[0, 0, .007], rgba=BLACK)
     _geom(body, "box", size=[.049, .018, .004], pos=[-.001, 0, .019])
     _geom(body, "box", size=[.050, .021, .012], pos=[-.002, 0, .035],
@@ -138,7 +251,7 @@ def _stapler(body):
     _geom(body, "box", size=[.006, .02, .008], pos=[.043, 0, .027])
 
 
-def _tape_dispenser(body):
+def _tape_dispenser(body, _assets):
     _geom(body, "box", size=[.054, .027, .008], pos=[0, 0, .008], rgba=BLACK)
     for y in [-.021, .021]:
         _geom(body, "box", size=[.022, .004, .017], pos=[-.023, y, .027], rgba=BLACK)
@@ -171,6 +284,11 @@ def build_scene(config: dict, layout: dict, output: Path) -> Path:
                   meshdir=str(ROOT / "assets/robots/franka_emika_panda/assets"))
     ET.SubElement(root, "option", timestep=".002", integrator="implicitfast", gravity="0 0 -9.81",
                   cone="elliptic", iterations="80", tolerance="1e-9")
+    assets = ET.SubElement(root, "asset")
+    ET.SubElement(assets, "material", name="flatware_steel", rgba=".58 .61 .65 1",
+                  specular=".40", shininess=".42")
+    ET.SubElement(assets, "material", name="tool_steel", rgba=".46 .49 .53 1",
+                  specular=".27", shininess=".28")
     visual = ET.SubElement(root, "visual")
     ET.SubElement(visual, "global", offwidth="1280", offheight="960")
     ET.SubElement(visual, "headlight", ambient=".25 .25 .25", diffuse=".35 .35 .35")
@@ -196,7 +314,7 @@ def build_scene(config: dict, layout: dict, output: Path) -> Path:
         body = ET.SubElement(world, "body", name=obj["name"], pos=_s(item["xyz_m"]),
                              euler=_s([0, 0, item["yaw_rad"]]))
         ET.SubElement(body, "freejoint", name=f"{obj['name']}_joint")
-        BUILDERS[obj["name"]](body)
+        BUILDERS[obj["name"]](body, assets)
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     ET.indent(root)
@@ -217,6 +335,8 @@ def initialize(model: mujoco.MjModel, data: mujoco.MjData) -> None:
 
 
 def body_bounds(model, data, name: str, *, collision_only=True):
+    import mujoco
+
     body_id = model.body(name).id
     indices = np.flatnonzero(model.geom_bodyid == body_id)
     corners = np.array([[x, y, z] for x in [-1, 1] for y in [-1, 1] for z in [-1, 1]])
@@ -224,7 +344,13 @@ def body_bounds(model, data, name: str, *, collision_only=True):
     for index in indices:
         if collision_only and not (model.geom_contype[index] or model.geom_conaffinity[index]):
             continue
-        local = model.geom_aabb[index, :3] + corners * model.geom_aabb[index, 3:]
+        if model.geom_type[index] == mujoco.mjtGeom.mjGEOM_MESH:
+            # A rotated mesh bounding box can put the spoon's curved shell below the table.
+            mesh = model.geom_dataid[index]
+            start = model.mesh_vertadr[mesh]
+            local = model.mesh_vert[start:start + model.mesh_vertnum[mesh]]
+        else:
+            local = model.geom_aabb[index, :3] + corners * model.geom_aabb[index, 3:]
         points.append(local @ data.geom_xmat[index].reshape(3, 3).T + data.geom_xpos[index])
     if not points:
         raise ValueError(f"No geometry for {name}")

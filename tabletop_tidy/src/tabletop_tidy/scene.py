@@ -555,22 +555,18 @@ def _storage_box(world, assets, actuators, category, box, *, powered_lid):
     for x in (-.68 * hx, .68 * hx):
         _geom(lid, "cylinder", pos=[x, 0, 0], size=[.006, .011],
               quat=[.70710678, 0, .70710678, 0], rgba=hardware, **hinge_collision)
+    front_y = -2 * outer_y - .001
+    handle_y, handle_z = front_y - .030, -.002
+    half_length = .45 * outer_x
+    for x in (-.75 * half_length, .75 * half_length):
+        _geom(lid, "box", pos=[x, front_y - .0145, .001],
+              size=[.006, .016, .004], rgba=hardware)
+    _geom(lid, "cylinder", name=f"{name}_handle",
+          fromto=[-half_length, handle_y, handle_z, half_length, handle_y, handle_z],
+          size=[.008], rgba=hardware)
     if powered_lid:
-        handle_y = -2 * outer_y + .028
-        for x in (-.032, .032):
-            _geom(lid, "box", pos=[x, handle_y, .010], size=[.005, .006, .006], rgba=hardware)
-        _geom(lid, "capsule", name=f"{name}_handle", fromto=[-.034, handle_y, .018, .034, handle_y, .018],
-              size=[.005], rgba=hardware)
         ET.SubElement(actuators, "position", name=name, joint=name,
                       ctrlrange=_s([0, BOX_OPEN_ANGLE]), forcerange="-1.2 1.2", kp="18", kv=".35")
-    else:
-        _geom(lid, "cylinder", pos=[-.065, -.070, .021], size=[.006, .021], rgba=hardware)
-        _geom(lid, "sphere", name=f"{name}_handle", pos=[-.065, -.070, .043], size=[.019], rgba=hardware)
-        # The underside pull is accessible from the front when the lid is open.
-        handle_x = .075 if category == "kitchen" else -.082
-        _geom(lid, "cylinder", pos=[handle_x, -.145, -.0185], size=[.006, .0185], rgba=hardware)
-        _geom(lid, "sphere", name=f"{name}_closing_handle", pos=[handle_x, -.145, -.037],
-              size=[.017], rgba=hardware)
 
 
 def build_scene(config: dict, layout: dict, output: Path, *, powered_lids: bool = True) -> Path:

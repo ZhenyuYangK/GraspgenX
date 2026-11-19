@@ -1,0 +1,4 @@
+{
+  "sam3": {"url": "https://github.com/facebookresearch/sam3", "commit": "eef6839bcfc3458dd52ea80535dc6bd62aea86b1"},
+  "graspgenx": {"url": "https://github.com/NVlabs/GraspGenX", "commit": "44eb1d77d6d27bc97ee361e3afb717a2115e30a9"}
+}

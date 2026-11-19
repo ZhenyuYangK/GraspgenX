@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from tabletop_tidy.scene import (
-    ROOT, body_bounds, build_scene, evaluate, initialize, load_config, sample_layout,
+    BOX_FLOOR_HEIGHT, ROOT, body_bounds, build_scene, evaluate, initialize, load_config, sample_layout,
 )
 from tabletop_tidy.control import PandaController
 from tabletop_tidy.camera import RGBDCamera
@@ -223,3 +223,52 @@ def test_evaluator_rejects_moving_object(simulation):
     mujoco.mj_forward(model, data)
     item = next(item for item in evaluate(model, data, config)["objects"] if item["name"] == "spoon")
     assert not item["stable"] and not item["success"]
+
+
+def test_storage_box_lids_open_independently_and_close_over_contents(simulation):
+    config, model = simulation
+    data = mujoco.MjData(model)
+    initialize(model, data, lids_open=False)
+    controller = PandaController(model, data)
+    names = [f"storage_box_lid_{category}" for category in config["trays"]]
+    angles = np.array([model.joint(name).qposadr[0] for name in names])
+    controls = np.array([model.actuator(name).id for name in names])
+    np.testing.assert_allclose(data.qpos[angles], 0)
+    kitchen_lid = model.body("storage_box_lid_kitchen").id
+    kitchen_box = model.body("storage_box_kitchen").id
+    x, y = config["trays"]["kitchen"]["center_xy_m"]
+    hit = np.empty(1, dtype=np.int32)
+    mujoco.mj_ray(model, data, [x, y, .35], [0, 0, -1], None, True, -1, hit)
+    assert hit[0] >= 0 and model.geom_bodyid[hit[0]] == kitchen_lid
+
+    opened = model.actuator_ctrlrange[controls, 1]
+    data.ctrl[controls[0]] = opened[0]
+    controller.hold(1)
+    np.testing.assert_allclose(data.qpos[angles], [opened[0], 0, 0], atol=.02)
+    mujoco.mj_ray(model, data, [x, y, .35], [0, 0, -1], None, True, -1, hit)
+    assert hit[0] >= 0 and model.geom_bodyid[hit[0]] == kitchen_box
+
+    data.ctrl[controls] = opened
+    controller.hold(1)
+    np.testing.assert_allclose(data.qpos[angles], opened, atol=.02)
+    put_in_trays(config, model, data, controller)
+    data.ctrl[controls] = 0
+    controller.hold(1)
+    np.testing.assert_allclose(data.qpos[angles], 0, atol=.02)
+    assert evaluate(model, data, config)["sorted_count"] == 6
+
+
+def test_evaluator_rejects_object_protruding_above_box(simulation):
+    config, model = simulation
+    data = mujoco.MjData(model)
+    initialize(model, data)
+    wrench = model.joint("wrench_joint").qposadr[0]
+    x, y = config["trays"]["tools"]["center_xy_m"]
+    data.qpos[wrench:wrench+7] = [x, y, 0, np.sqrt(.5), 0, np.sqrt(.5), 0]
+    mujoco.mj_forward(model, data)
+    low, _ = body_bounds(model, data, "wrench", collision_only=False)
+    data.qpos[wrench+2] = BOX_FLOOR_HEIGHT - low[2]
+    mujoco.mj_forward(model, data)
+    item = next(item for item in evaluate(model, data, config)["objects"] if item["name"] == "wrench")
+    assert item["inside_correct_tray"] and item["supported"] and item["stable"]
+    assert not item["fits_below_rim"] and not item["success"]

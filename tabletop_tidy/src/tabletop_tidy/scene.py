@@ -15,6 +15,11 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 HOME = np.array([-1., 0., 0., -1.57079, 0., 1.57079, -.7853, .04, .04])
 SILVER = (.63, .67, .72, 1.)
+BOX_FLOOR_HEIGHT = .008
+BOX_RIM_HEIGHT = .105
+BOX_OPEN_ANGLE = np.deg2rad(110)
+BOX_COLORS = {"kitchen": (.27, .47, .42), "tools": (.36, .42, .54),
+              "office": (.58, .40, .28)}
 
 
 def _s(values):
@@ -492,6 +497,68 @@ def _camera_axes(position, target):
     return _s([*right, *up])
 
 
+def _box_label(body, assets, category, half_width, front_y):
+    name = f"storage_box_label_{category}"
+    width, height, thickness = .86 * half_width, .022, .0005
+    # Explicit UVs keep the text upright on the outward-facing plate.
+    vertices = [(x, y, z) for y in (-thickness, thickness)
+                for x, z in [(-width, -height), (width, -height),
+                             (width, height), (-width, height)]]
+    ET.SubElement(assets, "mesh", name=name, vertex=_s(np.ravel(vertices)),
+                  texcoord="0 1 1 1 1 0 0 0 0 1 1 1 1 0 0 0",
+                  face="0 1 2 0 2 3 4 7 6 4 6 5 0 4 5 0 5 1 "
+                       "3 2 6 3 6 7 1 5 6 1 6 2 0 3 7 0 7 4")
+    ET.SubElement(assets, "texture", name=name, type="2d",
+                  file=str(ROOT / "assets" / "box_labels" / f"{category}.png"))
+    ET.SubElement(assets, "material", name=name, texture=name,
+                  texuniform="false", specular="0", shininess="0")
+    _geom(body, "mesh", mesh=name, material=name, rgba=None,
+          pos=[0, front_y - thickness, .056], contype="0", conaffinity="0", density="0")
+
+
+def _storage_box(world, assets, actuators, category, box):
+    body = ET.SubElement(world, "body", name=f"storage_box_{category}",
+                         pos=_s([*box["center_xy_m"], 0]))
+    hx, hy = box["inner_half_size_xy_m"]
+    wall = .005
+    outer_x, outer_y = hx + wall, hy + wall
+    rgb = np.array(BOX_COLORS[category])
+    shell, rim, hardware = [*rgb, 1], [*(rgb * .72), 1], [.09, .10, .11, 1]
+    floor_half = BOX_FLOOR_HEIGHT / 2
+    wall_half = (BOX_RIM_HEIGHT - BOX_FLOOR_HEIGHT) / 2
+    wall_center = BOX_FLOOR_HEIGHT + wall_half
+    _geom(body, "box", pos=[0, 0, floor_half], size=[outer_x, outer_y, floor_half],
+          rgba=[*(rgb * .78), 1])
+    for side in (-1, 1):
+        x, y = side * (hx + wall / 2), side * (hy + wall / 2)
+        _geom(body, "box", pos=[x, 0, wall_center], size=[wall / 2, outer_y, wall_half], rgba=shell)
+        _geom(body, "box", pos=[0, y, wall_center], size=[hx, wall / 2, wall_half], rgba=shell)
+        for center, size in [([x, 0], [wall / 2 + .0007, outer_y + .0007]),
+                             ([0, y], [hx * .99, wall / 2 + .0007])]:
+            _geom(body, "box", pos=[*center, BOX_RIM_HEIGHT - .002], size=[*size, .002],
+                  rgba=rim, contype="0", conaffinity="0", density="0")
+    _box_label(body, assets, category, hx, -outer_y)
+
+    name = f"storage_box_lid_{category}"
+    lid = ET.SubElement(body, "body", name=name, pos=_s([0, outer_y, BOX_RIM_HEIGHT + .005]))
+    ET.SubElement(lid, "joint", name=name, type="hinge", axis="-1 0 0",
+                  range=_s([0, BOX_OPEN_ANGLE]), damping=".04")
+    _geom(lid, "box", name=f"{name}_panel", pos=[0, -outer_y, 0],
+          size=[outer_x + .001, outer_y + .001, .004], rgba=rim)
+    _geom(lid, "box", pos=[0, -outer_y, .0045], size=[hx * .99, hy * .99, .0005],
+          rgba=shell, contype="0", conaffinity="0", density="0")
+    for x in (-.68 * hx, .68 * hx):
+        _geom(lid, "cylinder", pos=[x, 0, 0], size=[.006, .011],
+              quat=[.70710678, 0, .70710678, 0], rgba=hardware)
+    handle_y = -2 * outer_y + .028
+    for x in (-.032, .032):
+        _geom(lid, "box", pos=[x, handle_y, .010], size=[.005, .006, .006], rgba=hardware)
+    _geom(lid, "capsule", name=f"{name}_handle", fromto=[-.034, handle_y, .018, .034, handle_y, .018],
+          size=[.005], rgba=hardware)
+    ET.SubElement(actuators, "position", name=name, joint=name,
+                  ctrlrange=_s([0, BOX_OPEN_ANGLE]), forcerange="-1.2 1.2", kp="18", kv=".35")
+
+
 def build_scene(config: dict, layout: dict, output: Path) -> Path:
     """Write an independent MJCF beside the copied Panda include."""
     root = ET.Element("mujoco", model="panda_semantic_tidying")
@@ -532,6 +599,7 @@ def build_scene(config: dict, layout: dict, output: Path) -> Path:
     ET.SubElement(visual, "global", offwidth="1280", offheight="960")
     ET.SubElement(visual, "headlight", ambient=".25 .25 .25", diffuse=".35 .35 .35")
     world = ET.SubElement(root, "worldbody")
+    actuators = ET.SubElement(root, "actuator")
     ET.SubElement(world, "light", pos=".4 -.3 1.8", dir="0 0 -1", diffuse=".55 .55 .55")
     _geom(world, "plane", pos=[0, 0, -.75], size=[3, 3, .1], rgba=[.20, .22, .25, 1])
     _geom(world, "box", pos=[.40, 0, -.035], size=[.65, .57, .035], rgba=[.48, .46, .42, 1])
@@ -540,14 +608,8 @@ def build_scene(config: dict, layout: dict, output: Path) -> Path:
             ("overview", [1.25, -1.35, 1.10], [.43, -.01, .13], 45)]:
         ET.SubElement(world, "camera", name=name, pos=_s(pos),
                       xyaxes=_camera_axes(pos, target), fovy=str(fovy))
-    for category, tray in config["trays"].items():
-        body = ET.SubElement(world, "body", name=f"tray_{category}", pos=_s([*tray["center_xy_m"], 0]))
-        hx, hy = tray["inner_half_size_xy_m"]
-        color = {"kitchen": [.27, .47, .42, 1], "tools": [.36, .42, .54, 1], "office": [.58, .40, .28, 1]}[category]
-        _geom(body, "box", pos=[0, 0, .004], size=[hx+.006, hy+.006, .004], rgba=color)
-        for side in [-1, 1]:
-            _geom(body, "box", pos=[side*(hx+.003), 0, .018], size=[.003, hy+.006, .010], rgba=color)
-            _geom(body, "box", pos=[0, side*(hy+.003), .018], size=[hx, .003, .010], rgba=color)
+    for category, box in config["trays"].items():
+        _storage_box(world, assets, actuators, category, box)
     for obj in config["objects"]:
         item = layout["objects"][obj["name"]]
         body = ET.SubElement(world, "body", name=obj["name"], pos=_s(item["xyz_m"]),
@@ -561,7 +623,7 @@ def build_scene(config: dict, layout: dict, output: Path) -> Path:
     return output
 
 
-def initialize(model: mujoco.MjModel, data: mujoco.MjData) -> None:
+def initialize(model: mujoco.MjModel, data: mujoco.MjData, *, lids_open: bool = True) -> None:
     import mujoco
     for index in range(7):
         joint = model.joint(f"joint{index+1}")
@@ -570,6 +632,12 @@ def initialize(model: mujoco.MjModel, data: mujoco.MjData) -> None:
     for name in ["finger_joint1", "finger_joint2"]:
         data.qpos[model.joint(name).qposadr] = .04
     data.ctrl[model.actuator("actuator8").id] = 255.
+    for index in range(model.nu):
+        actuator = model.actuator(index)
+        if actuator.name.startswith("storage_box_lid_"):
+            angle = actuator.ctrlrange[int(lids_open)]
+            data.qpos[model.joint(actuator.name).qposadr] = angle
+            data.ctrl[index] = angle
     mujoco.mj_forward(model, data)
 
 
@@ -604,19 +672,20 @@ def evaluate(model, data, config) -> dict:
     limits = config["evaluation"]
     for obj in config["objects"]:
         low, high = body_bounds(model, data, obj["name"], collision_only=False)
-        tray = config["trays"][obj["category"]]
-        center, half = np.array(tray["center_xy_m"]), np.array(tray["inner_half_size_xy_m"])
+        box = config["trays"][obj["category"]]
+        center, half = np.array(box["center_xy_m"]), np.array(box["inner_half_size_xy_m"])
         inside = bool(np.all(low[:2] >= center-half) and np.all(high[:2] <= center+half))
+        fits_below_rim = bool(high[2] <= BOX_RIM_HEIGHT)
         velocity = np.zeros(6)
         mujoco.mj_objectVelocity(model, data, mujoco.mjtObj.mjOBJ_BODY,
                                 model.body(obj["name"]).id, velocity, 0)
         linear = float(np.linalg.norm(velocity[3:]))
         angular = float(np.linalg.norm(velocity[:3]))
-        # A tray floor is 8 mm above the table. This also rejects a held object.
-        supported = bool(abs(low[2] - .008) < limits["floor_gap_m"])
+        supported = bool(abs(low[2] - BOX_FLOOR_HEIGHT) < limits["floor_gap_m"])
         stable = linear < limits["max_linear_speed_m_s"] and angular < limits["max_angular_speed_rad_s"]
         details.append({"name": obj["name"], "category": obj["category"],
-                        "success": bool(inside and supported and stable), "inside_correct_tray": inside,
+                        "success": bool(inside and fits_below_rim and supported and stable),
+                        "inside_correct_tray": inside, "fits_below_rim": fits_below_rim,
                         "supported": supported, "stable": bool(stable),
                         "linear_speed_m_s": linear, "angular_speed_rad_s": angular,
                         "bounds_min_m": low.tolist(), "bounds_max_m": high.tolist()})

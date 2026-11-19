@@ -6,7 +6,7 @@ Panda模型来自MuJoCo Menagerie的Franka Emika Panda，固定版本为`8161bba
 
 `panda_scene.xml`、`src/tabletop_tidy/camera.py`及`src/tabletop_tidy/control.py`从用户提供的`zts_mujoco_sort`复制。Panda场景包含原项目增加的TCP、指腹名称和摩擦配置。复制来源及SHA-256记录在`source_manifest.json`。本项目通过主场景的compiler设置资产路径。
 
-六种物体、桌面和浅托盘由本项目以MuJoCo几何组合生成。当前物体是可辨认外形的仿真原型，尺寸参数直接记录在场景生成代码中。
+六种物体、桌面和翻盖收纳盒由本项目以MuJoCo几何组合生成。当前物体是可辨认外形的仿真原型，尺寸参数直接记录在场景生成代码中。收纳盒中文标签使用Noto Sans CJK SC字形生成，项目内保存的是渲染后的PNG纹理。
 
 SAM3源码：https://github.com/facebookresearch/sam3
 

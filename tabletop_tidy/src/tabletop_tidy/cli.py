@@ -9,6 +9,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+from queue import SimpleQueue
 import time
 
 from .scene import ROOT, build_scene, evaluate, initialize, load_config, sample_layout
@@ -20,6 +21,7 @@ def main(argv=None):
     parser.add_argument("--config", type=Path)
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/scene")
     parser.add_argument("--viewer", action="store_true")
+    parser.add_argument("--boxes-closed", action="store_true", help="Start the preview with all storage box lids closed")
     parser.add_argument("--check-sam3", action="store_true", help="Inspect local SAM3 checkpoint files and exit")
     parser.add_argument("--checkpoint", type=Path)
     args = parser.parse_args(argv)
@@ -46,7 +48,7 @@ def main(argv=None):
     scene_path = build_scene(config, layout, args.output / "scene.xml")
     model = mujoco.MjModel.from_xml_path(str(scene_path))
     data = mujoco.MjData(model)
-    initialize(model, data)
+    initialize(model, data, lids_open=not args.boxes_closed)
     controller = PandaController(model, data)
     controller.hold(1.5)
     import numpy as np
@@ -66,14 +68,30 @@ def main(argv=None):
                       "output": str(args.output), "task_executed": False}, ensure_ascii=False))
     if args.viewer:
         import mujoco.viewer
-        with mujoco.viewer.launch_passive(model, data) as viewer:
+
+        lid_keys = {ord(key): model.actuator(f"storage_box_lid_{category}")
+                    for key, category in zip("123", ("kitchen", "tools", "office"))
+                    if category in config["trays"]}
+        key_presses = SimpleQueue()
+
+        def on_key(key):
+            if key in lid_keys:
+                key_presses.put(key)
+
+        with mujoco.viewer.launch_passive(model, data, key_callback=on_key) as viewer:
             viewer.cam.lookat[:] = [.43, -.03, .15]
             viewer.cam.distance = 1.55
             viewer.cam.azimuth = 135
             viewer.cam.elevation = -35
             while viewer.is_running():
                 start = time.monotonic()
-                controller.step()
+                with viewer.lock():
+                    while not key_presses.empty():
+                        actuator = lid_keys[key_presses.get_nowait()]
+                        closed, opened = actuator.ctrlrange
+                        target_is_open = data.ctrl[actuator.id] > (closed + opened) / 2
+                        data.ctrl[actuator.id] = closed if target_is_open else opened
+                    controller.step()
                 viewer.sync()
                 time.sleep(max(0, model.opt.timestep-(time.monotonic()-start)))
     return 0

@@ -2,9 +2,9 @@
 
 使用MuJoCo、SAM3和NVIDIA GraspGenX完成Panda机械臂的桌面语义分类整理。项目代码位于[tabletop_tidy](tabletop_tidy/README.md)。
 
-当前仿真基线包含六种物体、三个带中文类别标签的翻盖收纳盒、可复现随机布局、RGB-D采集、独立入盒验收，以及SAM3权重下载和完整性校验工具。当前运行入口输出`task_executed=false`。
+## 启动整理演示
 
-下一阶段接入SAM3文本分割、GraspGenX抓取候选和自动抓放，完成六物体分类入盒。
+从项目根目录运行`./run.sh`。MuJoCo窗口会打开，采集当前场景的RGB-D并调用SAM3和GraspGenX。Panda依次尝试开盖、分类抓放和合盖。终端显示进度，整轮结果写入`tabletop_tidy/outputs/sorting-*/sorting_report.json`。
 
 ## 安装与验证
 

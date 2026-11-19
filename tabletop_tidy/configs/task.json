@@ -5,7 +5,7 @@
     {"name": "wrench", "category": "tools", "prompts": ["wrench", "spanner"], "radius_m": 0.088},
     {"name": "screwdriver", "category": "tools", "prompts": ["screwdriver"], "radius_m": 0.087},
     {"name": "stapler", "category": "office", "prompts": ["stapler"], "radius_m": 0.063},
-    {"name": "tape_dispenser", "category": "office", "prompts": ["tape dispenser"], "radius_m": 0.065}
+    {"name": "tape_dispenser", "category": "office", "prompts": ["tape dispenser", "desk tape dispenser", "adhesive tape dispenser"], "radius_m": 0.065}
   ],
   "trays": {
     "kitchen": {"center_xy_m": [0.24, 0.29], "inner_half_size_xy_m": [0.103, 0.105]},

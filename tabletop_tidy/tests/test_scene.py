@@ -258,6 +258,22 @@ def test_storage_box_lids_open_independently_and_close_over_contents(simulation)
     assert evaluate(model, data, config)["sorted_count"] == 6
 
 
+def test_unpowered_storage_box_lids_settle_at_the_hinge_limits(tmp_path):
+    config = load_config()
+    scene = build_scene(config, sample_layout(config, 42), tmp_path / "passive.xml", powered_lids=False)
+    model = mujoco.MjModel.from_xml_path(str(scene))
+    names = [f"storage_box_lid_{category}" for category in config["trays"]]
+    assert all(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, name) == -1 for name in names)
+
+    for lids_open in (False, True):
+        data = mujoco.MjData(model)
+        initialize(model, data, lids_open=lids_open)
+        PandaController(model, data).hold(1.5)
+        for name in names:
+            joint = model.joint(name)
+            np.testing.assert_allclose(data.qpos[joint.qposadr], joint.range[int(lids_open)], atol=.02)
+
+
 def test_evaluator_rejects_object_protruding_above_box(simulation):
     config, model = simulation
     data = mujoco.MjData(model)

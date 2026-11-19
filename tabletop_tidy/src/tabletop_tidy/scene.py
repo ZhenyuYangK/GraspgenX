@@ -516,7 +516,7 @@ def _box_label(body, assets, category, half_width, front_y):
           pos=[0, front_y - thickness, .056], contype="0", conaffinity="0", density="0")
 
 
-def _storage_box(world, assets, actuators, category, box):
+def _storage_box(world, assets, actuators, category, box, *, powered_lid):
     body = ET.SubElement(world, "body", name=f"storage_box_{category}",
                          pos=_s([*box["center_xy_m"], 0]))
     hx, hy = box["inner_half_size_xy_m"]
@@ -542,24 +542,38 @@ def _storage_box(world, assets, actuators, category, box):
     name = f"storage_box_lid_{category}"
     lid = ET.SubElement(body, "body", name=name, pos=_s([0, outer_y, BOX_RIM_HEIGHT + .005]))
     ET.SubElement(lid, "joint", name=name, type="hinge", axis="-1 0 0",
-                  range=_s([0, BOX_OPEN_ANGLE]), damping=".04")
+                  range=_s([0, BOX_OPEN_ANGLE]), damping=".04" if powered_lid else ".012")
+    if not powered_lid:
+        # A counterweighted lid stays against the nearest stop once released
+        # on either side of its over-center point (about 36 degrees).
+        ET.SubElement(lid, "inertial", pos="0 -.035 .048", mass=".16", diaginertia=".001 .0011 .0011")
     _geom(lid, "box", name=f"{name}_panel", pos=[0, -outer_y, 0],
           size=[outer_x + .001, outer_y + .001, .004], rgba=rim)
     _geom(lid, "box", pos=[0, -outer_y, .0045], size=[hx * .99, hy * .99, .0005],
           rgba=shell, contype="0", conaffinity="0", density="0")
+    hinge_collision = {} if powered_lid else {"contype": "0", "conaffinity": "0"}
     for x in (-.68 * hx, .68 * hx):
         _geom(lid, "cylinder", pos=[x, 0, 0], size=[.006, .011],
-              quat=[.70710678, 0, .70710678, 0], rgba=hardware)
-    handle_y = -2 * outer_y + .028
-    for x in (-.032, .032):
-        _geom(lid, "box", pos=[x, handle_y, .010], size=[.005, .006, .006], rgba=hardware)
-    _geom(lid, "capsule", name=f"{name}_handle", fromto=[-.034, handle_y, .018, .034, handle_y, .018],
-          size=[.005], rgba=hardware)
-    ET.SubElement(actuators, "position", name=name, joint=name,
-                  ctrlrange=_s([0, BOX_OPEN_ANGLE]), forcerange="-1.2 1.2", kp="18", kv=".35")
+              quat=[.70710678, 0, .70710678, 0], rgba=hardware, **hinge_collision)
+    if powered_lid:
+        handle_y = -2 * outer_y + .028
+        for x in (-.032, .032):
+            _geom(lid, "box", pos=[x, handle_y, .010], size=[.005, .006, .006], rgba=hardware)
+        _geom(lid, "capsule", name=f"{name}_handle", fromto=[-.034, handle_y, .018, .034, handle_y, .018],
+              size=[.005], rgba=hardware)
+        ET.SubElement(actuators, "position", name=name, joint=name,
+                      ctrlrange=_s([0, BOX_OPEN_ANGLE]), forcerange="-1.2 1.2", kp="18", kv=".35")
+    else:
+        _geom(lid, "cylinder", pos=[-.065, -.070, .021], size=[.006, .021], rgba=hardware)
+        _geom(lid, "sphere", name=f"{name}_handle", pos=[-.065, -.070, .043], size=[.019], rgba=hardware)
+        # The underside pull is accessible from the front when the lid is open.
+        handle_x = .075 if category == "kitchen" else -.082
+        _geom(lid, "cylinder", pos=[handle_x, -.145, -.0185], size=[.006, .0185], rgba=hardware)
+        _geom(lid, "sphere", name=f"{name}_closing_handle", pos=[handle_x, -.145, -.037],
+              size=[.017], rgba=hardware)
 
 
-def build_scene(config: dict, layout: dict, output: Path) -> Path:
+def build_scene(config: dict, layout: dict, output: Path, *, powered_lids: bool = True) -> Path:
     """Write an independent MJCF beside the copied Panda include."""
     root = ET.Element("mujoco", model="panda_semantic_tidying")
     # Absolute include makes outputs portable within this installation.
@@ -609,13 +623,22 @@ def build_scene(config: dict, layout: dict, output: Path) -> Path:
         ET.SubElement(world, "camera", name=name, pos=_s(pos),
                       xyaxes=_camera_axes(pos, target), fovy=str(fovy))
     for category, box in config["trays"].items():
-        _storage_box(world, assets, actuators, category, box)
+        _storage_box(world, assets, actuators, category, box, powered_lid=powered_lids)
     for obj in config["objects"]:
         item = layout["objects"][obj["name"]]
         body = ET.SubElement(world, "body", name=obj["name"], pos=_s(item["xyz_m"]),
                              euler=_s([0, 0, item["yaw_rad"]]))
         ET.SubElement(body, "freejoint", name=f"{obj['name']}_joint")
         BUILDERS[obj["name"]](body, assets)
+        if not powered_lids:
+            scale = config["execution"].get("pickup_thickness_scale", {}).get(obj["name"], 1.)
+            if scale != 1.:
+                meshes = {geom.attrib["mesh"] for geom in body.findall("geom")}
+                for mesh in assets.findall("mesh"):
+                    if mesh.attrib["name"] in meshes:
+                        mesh.set("scale", _s([1., 1., scale]))
+                for geom in body.findall("geom"):
+                    geom.set("density", str(float(geom.attrib["density"]) / scale))
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     ET.indent(root)
@@ -632,12 +655,14 @@ def initialize(model: mujoco.MjModel, data: mujoco.MjData, *, lids_open: bool = 
     for name in ["finger_joint1", "finger_joint2"]:
         data.qpos[model.joint(name).qposadr] = .04
     data.ctrl[model.actuator("actuator8").id] = 255.
-    for index in range(model.nu):
-        actuator = model.actuator(index)
-        if actuator.name.startswith("storage_box_lid_"):
-            angle = actuator.ctrlrange[int(lids_open)]
-            data.qpos[model.joint(actuator.name).qposadr] = angle
-            data.ctrl[index] = angle
+    for index in range(model.njnt):
+        joint = model.joint(index)
+        if joint.name.startswith("storage_box_lid_"):
+            angle = joint.range[int(lids_open)]
+            data.qpos[joint.qposadr] = angle
+            actuator_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, joint.name)
+            if actuator_id >= 0:
+                data.ctrl[actuator_id] = angle
     mujoco.mj_forward(model, data)
 
 

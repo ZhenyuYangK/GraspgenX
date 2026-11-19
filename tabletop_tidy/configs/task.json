@@ -14,7 +14,10 @@
   },
   "layout": {"x_m": [0.22, 0.76], "y_m": [-0.51, 0.11], "gripper_clearance_m": 0.025, "max_attempts": 30000},
   "camera": {"width": 960, "height": 720},
-  "execution": {"max_attempts_per_object": 3, "transport_clearance_m": 0.30},
+  "execution": {
+    "max_attempts_per_object": 3, "transport_clearance_m": 0.30,
+    "pickup_thickness_scale": {"spoon": 1.7, "wrench": 2.6}
+  },
   "evaluation": {"settle_seconds": 1.5, "max_linear_speed_m_s": 0.03, "max_angular_speed_rad_s": 0.3, "floor_gap_m": 0.006},
   "sam3": {"confidence_threshold": 0.25},
   "graspgenx": {"gripper_name": "franka_panda", "num_grasps": 100}

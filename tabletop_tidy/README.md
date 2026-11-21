@@ -22,6 +22,12 @@
 
 终端显示运行阶段，逐件抓取、模型调用、盒盖动作及最终验收写入`outputs/sorting-*/sorting_report.json`。使用`./run.sh --seed 42 --headless`可离屏运行同一流程并输出报告。
 
+使用带Matplotlib和中文字体的Python环境，从仓库根目录将报告绘制为PNG。默认把图片写在JSON旁，可通过`--output`指定保存路径，或通过`--font`指定中文字体文件。
+
+```bash
+python3 tabletop_tidy/scripts/plot_sorting_report.py /实际路径/sorting_report.json
+```
+
 整理模式使用带开合把手和配重的无电机盒盖。勺子和扳手经加厚以提高夹爪接触余量，并保留各自质量。两个模型按阶段运行。仿真物体真值用于接触诊断和独立入盒验收。
 
 ## 运行场景预览

@@ -17,12 +17,14 @@ import numpy as np
 
 @dataclass(frozen=True)
 class RGBDFrame:
+    # rgb形状为(H, W, 3)，depth为同一视角的(H, W)米制深度图。
     rgb: np.ndarray
     depth: np.ndarray
 
 
 @dataclass(frozen=True)
 class CameraCalibration:
+    # K是3×3内参矩阵，T_base_camera把OpenCV相机坐标转换到Panda基座坐标。
     width: int
     height: int
     K: np.ndarray
@@ -58,12 +60,14 @@ class CameraCalibration:
             raise ValueError("This calibration requires a perspective camera")
         if np.any(model.cam_sensorsize[camera_id] > 0):
             raise ValueError("Use the scene's fovy camera; physical sensor intrinsics are unsupported")
+        # 用垂直视场角和图像高度算出像素焦距，主点取最外侧像素中心的中点。
         focal = 0.5 * height / np.tan(np.deg2rad(float(model.cam_fovy[camera_id])) / 2)
         K = np.array([[focal, 0, (width - 1) / 2],
                       [0, focal, (height - 1) / 2], [0, 0, 1]], dtype=float)
-        # MuJoCo local camera: +x right, +y up, viewing direction -z.
+        # MuJoCo相机向右、向上、朝负Z看；翻转Y和Z得到OpenCV的向右、向下、朝正Z。
         R_world_camera = data.cam_xmat[camera_id].reshape(3, 3) @ np.diag([1., -1., -1.])
         R_world_base = data.xmat[base_id].reshape(3, 3)
+        # 先求相机相对世界的位姿，再用基座旋转的转置表示相机相对基座的位姿。
         T = np.eye(4)
         T[:3, :3] = R_world_base.T @ R_world_camera
         T[:3, 3] = R_world_base.T @ (data.cam_xpos[camera_id] - data.xpos[base_id])
@@ -77,6 +81,7 @@ class CameraCalibration:
         z = np.broadcast_to(np.asarray(depth, dtype=float), uv.shape[:-1])
         if not np.all(np.isfinite(uv)) or not np.all(np.isfinite(z) & (z > 0)):
             raise ValueError("Pixels must be finite and depth must be finite and positive")
+        # 深度已经是相机光轴上的Z值。去掉主点偏移并除以焦距，再乘Z还原相机坐标。
         camera_points = np.stack(((uv[..., 0] - self.K[0, 2]) * z / self.K[0, 0],
                                   (uv[..., 1] - self.K[1, 2]) * z / self.K[1, 1], z), axis=-1)
         return camera_points @ self.T_base_camera[:3, :3].T + self.T_base_camera[:3, 3]
@@ -86,6 +91,7 @@ class CameraCalibration:
         points = np.asarray(points_base, dtype=float)
         if points.shape[-1:] != (3,) or not np.all(np.isfinite(points)):
             raise ValueError("points_base must contain finite 3-D points")
+        # 先逆变换回相机坐标，再除以光轴深度做透视投影；画面外的像素也返回。
         camera_points = (points - self.T_base_camera[:3, 3]) @ self.T_base_camera[:3, :3]
         z = camera_points[..., 2]
         if np.any(z <= 0):
@@ -131,6 +137,7 @@ class RGBDCamera:
         self.renderer = mujoco.Renderer(model, height=height, width=width)
 
     def capture(self) -> RGBDFrame:
+        # 更新一次场景后渲染两遍，保证RGB和深度对应同一时刻和像素。
         self.renderer.update_scene(self.data, camera=self.camera_name)
         self.renderer.disable_depth_rendering()
         rgb = self.renderer.render().copy()

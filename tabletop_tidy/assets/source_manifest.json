@@ -363,12 +363,14 @@
     {
       "source": "/home/eddie/GraspgenX/zts_mujoco_sort/src/panda_pick_place/camera.py",
       "target": "src/tabletop_tidy/camera.py",
-      "sha256": "733ab4d45087c6e5419256666718e76e6b98e578a3016d43e9469576ea13a5a3"
+      "sha256": "2c76fcc0fd0fc2d12f9759ed029ec2efab22b59b2f961cc168899204b288b8ad",
+      "source_sha256": "733ab4d45087c6e5419256666718e76e6b98e578a3016d43e9469576ea13a5a3"
     },
     {
       "source": "/home/eddie/GraspgenX/zts_mujoco_sort/src/panda_pick_place/control.py",
       "target": "src/tabletop_tidy/control.py",
-      "sha256": "54af428d6b3fbf12e2bb3c49e6b271ae476b4a2f096a40b2bd8ad7ae7ec8c9b4"
+      "sha256": "0017ee60fc22c5a068b4bcf1ff1c881d81a4276b0d44dfd5a3b5492e14c8a3a5",
+      "source_sha256": "54af428d6b3fbf12e2bb3c49e6b271ae476b4a2f096a40b2bd8ad7ae7ec8c9b4"
     }
   ],
   "source_removed_after_copy_verification": true,

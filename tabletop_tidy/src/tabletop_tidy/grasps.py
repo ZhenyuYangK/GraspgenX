@@ -10,8 +10,7 @@ import numpy as np
 
 def panda_tcp_poses(grasp_poses: np.ndarray, hand_to_tcp: np.ndarray) -> np.ndarray:
     """Map GraspGenX grasp poses to the Panda TCP in the same reference frame."""
-    # The upstream Panda profile post-multiplies the grasp by Rz(+90°)
-    # to align the parallel jaws. The MuJoCo TCP is offset from the hand.
+    # 右乘局部Z轴的90°旋转以对齐Panda双指，再将手掌到TCP的偏移带入当前抓取方向。
     grasp_to_hand = np.array([[0., -1., 0., 0.], [1., 0., 0., 0.],
                               [0., 0., 1., 0.], [0., 0., 0., 1.]])
     return grasp_poses @ grasp_to_hand @ hand_to_tcp
@@ -31,7 +30,7 @@ class GraspGenX:
 
         if not torch.cuda.is_available():
             raise RuntimeError("GraspGenX inference requires access to a CUDA device")
-        # The upstream package discovers these paths at import time.
+        # GraspGenX在导入时读取路径环境变量，因此先设置权重和夹爪描述的位置。
         os.environ["GRASPGENX_CHECKPOINT_DIR"] = str(checkpoints.resolve())
         os.environ["GRASPGENX_GRIPPER_CFG_DIR"] = str(grippers.resolve())
         from graspgenx._constants import MIN_OBJECT_POINT_COUNT
@@ -56,11 +55,12 @@ class GraspGenX:
                                                    topk_num_grasps=self.num_grasps)
         poses = poses.cpu().numpy().reshape(-1, 4, 4)
         scores = scores.cpu().numpy()
+        # 位姿和分数一起过滤、排序，保持每个位姿对应原来的模型分数。
         keep = np.isfinite(poses).all(axis=(1, 2)) & np.isfinite(scores)
         order = np.argsort(-scores[keep], kind="stable")[:self.num_grasps]
         poses, scores = poses[keep][order], scores[keep][order]
         if np.max(points[:, 2]) < .045:
-            # Add model-scored top-down alternatives for low-profile objects.
+            # 为贴近桌面的物品补充有模型评分的俯抓候选，结束后恢复Torch随机状态。
             with self.torch.random.fork_rng(devices=[self.torch.cuda.current_device()]):
                 result = self.grasp_moe(points, self.sampler, num_grasps=48, obb_density="dense",
                                         z_offsets_cm=(-1.5, -.8, 0.))

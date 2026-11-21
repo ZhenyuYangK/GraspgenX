@@ -25,6 +25,7 @@ def main(argv=None):
     parser.add_argument("--check-sam3", action="store_true", help="Inspect local SAM3 checkpoint files and exit")
     parser.add_argument("--checkpoint", type=Path)
     args = parser.parse_args(argv)
+    # 权重检查走独立分支，完成后直接返回，供无渲染环境诊断本地文件。
     if args.checkpoint is not None and not args.check_sam3:
         parser.error("--checkpoint requires --check-sam3; this entry point currently previews the scene")
     if args.check_sam3:
@@ -34,7 +35,7 @@ def main(argv=None):
                   "inference_run": False, "files": files}
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return 0 if any(item["is_sam3_candidate"] for item in files) else 2
-    # Import rendering-related modules after selecting the GL backend.
+    # 必须在导入MuJoCo渲染模块前选择GL后端；无窗口预览默认使用EGL。
     if not args.viewer:
         os.environ.setdefault("MUJOCO_GL", "egl")
     import mujoco
@@ -52,14 +53,17 @@ def main(argv=None):
     controller = PandaController(model, data)
     controller.hold(1.5)
     import numpy as np
+    # 保存同一仿真状态下的RGB、米制深度和标定，供infer_scene.py离线读取。
     with RGBDCamera(model, data, **config["camera"]) as camera:
         frame = camera.capture()
+        # OpenCV写图使用BGR通道顺序，渲染器返回RGB。
         cv2.imwrite(str(args.output / "rgb.png"), cv2.cvtColor(frame.rgb, cv2.COLOR_RGB2BGR))
         np.save(args.output / "depth_m.npy", frame.depth)
         camera.calibration.save(args.output / "calibration.json")
     with RGBDCamera(model, data, width=960, height=720, camera_name="overview") as camera:
         frame = camera.capture()
         cv2.imwrite(str(args.output / "overview.png"), cv2.cvtColor(frame.rgb, cv2.COLOR_RGB2BGR))
+    # 预览报告记录物品初始状态，task_executed标记完整任务是否执行。
     report = {"mode": "scene_preview", "task_executed": False,
               "layout": layout, "initial_evaluation": evaluate(model, data, config)}
     for name, value in [("layout.json", layout), ("scene_report.json", report)]:
@@ -72,6 +76,7 @@ def main(argv=None):
         lid_keys = {ord(key): model.actuator(f"storage_box_lid_{category}")
                     for key, category in zip("123", ("kitchen", "tools", "office"))
                     if category in config["trays"]}
+        # 窗口回调只登记按键，仿真循环持锁切换盒盖执行器的目标角度。
         key_presses = SimpleQueue()
 
         def on_key(key):

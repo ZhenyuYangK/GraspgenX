@@ -19,6 +19,7 @@ from tabletop_tidy.scene import load_config
 
 
 def segment(args, config):
+    # 用预览或实时采集保存的三个文件还原彩色图、深度图和相机标定。
     with Image.open(args.scene / "rgb.png") as image:
         rgb = np.asarray(image.convert("RGB"))
     frame = RGBDFrame(rgb, np.load(args.scene / "depth_m.npy"))
@@ -29,6 +30,7 @@ def segment(args, config):
     observations = model.detect(frame, calibration, config)
     args.output.mkdir(parents=True)
     objects = []
+    # JSON保留所有配置物品的检测状态，掩膜和基座坐标系中的点云单独存为NPZ。
     for obj in config["objects"]:
         name = obj["name"]
         observation = observations.get(name)
@@ -47,9 +49,11 @@ def segment(args, config):
 def grasp(args, config):
     import torch
 
+    # 以上一阶段的报告为索引，固定Torch随机种子后逐件读取点云。
     report = json.loads((args.segmentation / "sam3.json").read_text(encoding="utf-8"))
     torch.manual_seed(args.seed)
     model = GraspGenX(args.checkpoints, args.grippers, config["graspgenx"])
+    # 仿真模型中的tcp站点给出了手掌到工具中心点的局部平移。
     tcp = ET.parse(ROOT / "assets/panda_scene.xml").find(".//site[@name='tcp']")
     hand_to_tcp = np.eye(4)
     hand_to_tcp[:3, 3] = np.fromstring(tcp.attrib["pos"], sep=" ")
@@ -62,6 +66,7 @@ def grasp(args, config):
         if obj["detected"]:
             with np.load(args.segmentation / obj["file"]) as observation:
                 points = observation["points"]
+        # 点数达到模型要求后才生成候选，同时保存原始抓取位姿和控制器使用的TCP位姿。
         if len(points) >= model.min_points:
             poses, scores = model.generate(points)
             entry["candidate_count"] = len(poses)
@@ -100,6 +105,7 @@ def main():
     grasp_parser.set_defaults(run=grasp, report_name="graspgenx.json")
 
     args = parser.parse_args()
+    # 每次调用使用新目录，避免混用旧报告及其引用的逐件结果。
     if args.output.exists():
         parser.error(f"Output directory already exists: {args.output}")
     try:

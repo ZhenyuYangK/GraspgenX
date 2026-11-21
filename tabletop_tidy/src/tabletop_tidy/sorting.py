@@ -15,6 +15,7 @@ from .scene import BOX_FLOOR_HEIGHT, BOX_RIM_HEIGHT, HOME, evaluate
 
 
 def tune_gripper(model):
+    # 同步提高夹爪执行器的增益和位置反馈系数，再增大双指的滑动摩擦以提高抓持力。
     gripper = model.actuator("actuator8").id
     model.actuator_gainprm[gripper, 0] *= 8
     model.actuator_biasprm[gripper, 1] *= 8
@@ -27,6 +28,7 @@ class ContactCheck:
         self.model, self.data = model, data
         self.target = model.body(target).id
         self.fingers = {model.body(name).id for name in ("left_finger", "right_finger")}
+        # 沿父子关系找出基座以下的机械臂部件。接触检查排除固定基座本身。
         base = model.body("link0").id
         robot = {base}
         for body in range(base + 1, model.nbody):
@@ -36,11 +38,13 @@ class ContactCheck:
 
     def check(self):
         for contact in self.data.contact:
+            # 略过小于0.5毫米的穿入以及分离的接触对，便于聚焦有明显穿入的接触。
             if contact.dist > -.0005:
                 continue
             a, b = map(int, self.model.geom_bodyid[[contact.geom1, contact.geom2]])
             if b in self.robot and a not in self.robot:
                 a, b = b, a
+            # 双指之间、指尖轻触世界几何体和指尖接触抓取目标是允许的情况。
             if a in self.fingers and (b in self.fingers or (b == 0 and contact.dist > -.002)):
                 continue
             if a in self.robot and not (a in self.fingers and b == self.target):
@@ -48,6 +52,7 @@ class ContactCheck:
 
 
 def _roll(angle):
+    # 按盒盖铰链的负X轴方向计算转动。
     c, s = np.cos(angle), np.sin(angle)
     return np.array([[1., 0., 0.], [0., c, s], [0., -s, c]])
 
@@ -63,6 +68,7 @@ def move_joint_path(arm, position, rotation, seconds, stage):
     try:
         end = arm.solve_ik(position, rotation, seed=start)
     except RuntimeError:
+        # 当前关节角附近找不到解时，改用初始姿态为起点搜索另一组关节解。
         end = arm.solve_ik(position, rotation, seed=HOME[:7])
     _move_joints(arm, start, end, seconds)
     error = np.linalg.norm(arm.tcp_position() - position)
@@ -72,6 +78,7 @@ def move_joint_path(arm, position, rotation, seconds, stage):
 
 
 def _move_joints(arm, start, end, seconds):
+    # 用五次曲线在关节空间插值，起止位置的速度与加速度都平滑归零。
     steps = max(1, round(.02 / arm.model.opt.timestep))
     count = round(seconds / (steps * arm.model.opt.timestep))
     for t in np.linspace(0, 1, count + 1)[1:]:
@@ -110,7 +117,7 @@ def operate_lid(arm, category, opening):
     anchor = data.xanchor[joint.id].copy()
     center = data.geom_xpos[handle].copy()
     offset = center - anchor
-    # Move past the passive lid's over-center point before releasing it.
+    # 开盖和合盖都推过配重平衡点，再交给重力把盒盖带到对应的限位。
     if opening:
         release_angle = 55
         approach_roll = -40 if category == "kitchen" else -35
@@ -121,8 +128,7 @@ def operate_lid(arm, category, opening):
         approach_roll, release_roll = 0, -40
         skew_degrees = {"kitchen": -25, "tools": 0, "office": 40}[category]
 
-    # Skew the approach along the bar to keep the near and far boxes in reach.
-    # This rotation preserves the finger closing axis across the cylinder.
+    # 针对盒子位置沿把手方向调整手腕姿态，双指仍横跨圆柱把手闭合。
     skew = np.deg2rad(skew_degrees)
     c, s = np.cos(skew), np.sin(skew)
     grip = DOWNWARD @ np.array([[c, 0., s], [0., 1., 0.], [-s, 0., c]])
@@ -137,6 +143,7 @@ def operate_lid(arm, category, opening):
     if fingers_on_handle() != fingers:
         raise RuntimeError(f"The gripper missed the {category} lid handle")
 
+    # 用铰链锚点和初始把手偏移计算圆弧上的各段目标，并检查盒盖角度与手指接触。
     for fraction in np.linspace(0., 1., 13)[1:]:
         angle = start + fraction * (finish - start)
         rotation = _roll(first_roll + fraction * (last_roll - first_roll)) @ grip
@@ -157,6 +164,7 @@ def operate_lid(arm, category, opening):
 
 @dataclass(frozen=True)
 class Transfer:
+    # 候选序号和分数用于追溯模型输出；位置、姿态和抬升高度用于执行抓放。
     candidate: int
     score: float
     pick: np.ndarray
@@ -167,15 +175,18 @@ class Transfer:
 
 
 def _transfers(poses, scores, points, box, lane, height):
+    # 用点云水平坐标的百分位估算中心和边界，降低少量离群点的影响。
     points_xy = points[:, :2]
     low, high = np.percentile(points_xy, [1, 99], axis=0)
     center = (low + high) / 2
     eigenvalues, axes = np.linalg.eigh(np.cov(points_xy, rowvar=False))
     angle = np.arctan2(axes[1, -1], axes[0, -1])
+    # 细长物品放置时将主轴对齐盒子的X轴，其余物品沿用原水平朝向。
     turn = np.pi / 2 - (angle + np.pi / 2) % np.pi if eigenvalues[-1] > 1.25 * eigenvalues[0] else 0.
     slot = np.asarray(box["center_xy_m"]) + [0., lane * .047]
     order = np.argsort(-scores * np.clip(-poses[:, 2, 2], .05, 1.) ** .65)
     choices = []
+    # 排序偏好向下的高分候选，并筛掉姿态过斜、超出高度范围或离物品太远的抓取点。
     for index in order:
         pose = poses[index]
         position = pose[:3, 3]
@@ -184,6 +195,7 @@ def _transfers(poses, scores, points, box, lane, height):
         if np.any(position[:2] < low - .022) or np.any(position[:2] > high + .022):
             continue
         choices.append(index)
+    # 尝试不同抓取高度、垂直进给、双指对调和反向摆放，供后续仿真验证。
     for offset, vertical, flip, other_yaw in ((-.004, False, False, False), (0., True, False, False),
                                               (-.002, True, True, False), (0., False, False, True),
                                               (-.004, True, False, True), (-.007, False, True, False),
@@ -200,6 +212,7 @@ def _transfers(poses, scores, points, box, lane, height):
                 rotation = _yaw(np.arctan2(closing[0], -closing[1])) @ DOWNWARD
             if flip:
                 rotation = rotation @ np.diag([-1., -1., 1.])
+            # 以盒内槽位为物体中心，保留抓取点相对物体中心的偏移，并随物体一起旋转。
             release = np.r_[slot + align[:2, :2] @ (pick[:2] - center),
                             pick[2] + BOX_FLOOR_HEIGHT + .018]
             yield Transfer(int(index), float(scores[index]), pick, rotation, release, align @ rotation, height)
@@ -207,6 +220,7 @@ def _transfers(poses, scores, points, box, lane, height):
 
 def _pick_object(arm, name, transfer):
     pick, rotation = transfer.pick, transfer.rotation
+    # 沿工具进给轴反向退7.5厘米作为预抓取点，再直线靠近，检查物体有没有被推走。
     above = pick - .075 * rotation[:, 2]
     source = arm.data.body(name)
     start = source.xpos.copy()
@@ -220,6 +234,7 @@ def _pick_object(arm, name, transfer):
 
     lifted = np.r_[pick[:2], min(.21, transfer.height)]
     arm.move(lifted, 1.3, f"{name} lift", rotation=rotation)
+    # 抬升后同时检查双指接触和物体实际高度，识别空抓或途中滑落。
     if len(arm.finger_contacts(name)) != 2 or source.xpos[2] - start[2] < .055:
         raise RuntimeError("Object slipped during lift")
 
@@ -233,6 +248,7 @@ def _place_object(arm, name, transfer, settle_seconds):
     release, release_rotation = transfer.release, transfer.release_rotation
     rotation = transfer.rotation
     carrying_height = transfer.height
+    # 在固定的空中中转点调整朝向，然后移到盒子上方下降和松手。
     transit = np.r_[.46, -.03, carrying_height]
     move_joint_path(arm, transit, rotation, 1.35, f"{name} transit")
     move_joint_path(arm, transit, release_rotation, .6, f"{name} align")
@@ -249,6 +265,7 @@ def _place_object(arm, name, transfer, settle_seconds):
 
 def plan_transfer(arm, config, obj, lane, poses, scores, points, idle: Callable[[], None]):
     model = arm.model
+    # scratch用于试跑，held保存抓稳后的状态，供多个放置方案从同一状态开始。
     scratch = mj.MjData(model)
     held = mj.MjData(model)
     name = obj["name"]
@@ -260,6 +277,7 @@ def plan_transfer(arm, config, obj, lane, poses, scores, points, idle: Callable[
     for proposal in _transfers(poses, scores, points, box, lane, config["execution"]["transport_clearance_m"]):
         idle()
         trial = PandaController(model, scratch, on_step=contact.check)
+        # 用当前场景覆盖试跑状态，从同一现场条件尝试每个抓取候选。
         mj.mj_copyData(scratch, model, arm.data)
         try:
             with redirect_stdout(StringIO()):
@@ -270,8 +288,7 @@ def plan_transfer(arm, config, obj, lane, poses, scores, points, idle: Callable[
             continue
 
         mj.mj_copyData(held, model, scratch)
-        # Try the low release first. Higher/front-biased releases leave more
-        # clearance for fingertips and the open lid above the rear slot.
+        # 先尝试低位释放，再试抬高或前移，给指尖和后排槽位上方的盒盖留出间隙。
         for dx, dy, height in ((0., 0., proposal.release[2]), (0., -.020, BOX_RIM_HEIGHT + .025),
                                (0., 0., BOX_RIM_HEIGHT + .022), (0., 0., BOX_RIM_HEIGHT + .047),
                                (-.020, -.012, BOX_RIM_HEIGHT + .025), (0., -.025, BOX_RIM_HEIGHT + .060),
@@ -287,6 +304,7 @@ def plan_transfer(arm, config, obj, lane, poses, scores, points, idle: Callable[
                 with redirect_stdout(StringIO()):
                     _place_object(trial, name, placement, settle)
                 sorted_names = {item["name"] for item in evaluate(model, scratch, config)["objects"] if item["success"]}
+                # 方案必须让当前物体合格，并保持已经入盒的物体继续合格。
                 if already_sorted | {name} <= sorted_names:
                     return placement, errors
                 message = "Object did not settle completely inside its box"

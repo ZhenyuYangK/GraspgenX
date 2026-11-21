@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 
 def sha256_file(path: Path) -> str:
+    # 每次读8MiB，权重文件很大时也只需保留当前块。
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
@@ -23,6 +24,7 @@ def sha256_file(path: Path) -> str:
 
 
 def verify_file(path: Path, size: int, expected_sha256: str) -> str:
+    # 先筛掉长度错误，再用SHA-256发现长度相同但内容损坏的文件。
     if path.stat().st_size != size:
         raise ValueError("文件大小与官方元数据不一致")
     actual = sha256_file(path)
@@ -47,7 +49,7 @@ def main(argv=None) -> int:
         return 3
 
     try:
-        # Token is resolved by the official client, never saved in project files.
+        # 官方客户端读取本机登录凭据，再查询权重文件的大小、哈希和所在提交。
         info = HfApi(endpoint=ENDPOINT).model_info(REPO, files_metadata=True, token=True)
         checkpoint = next(item for item in info.siblings if item.rfilename == "sam3.pt")
         lfs = checkpoint.lfs
@@ -59,14 +61,14 @@ def main(argv=None) -> int:
                     "size_bytes": expected_size, "expected_sha256": expected_sha,
                     "model_loaded": False, "inference_run": False}
         if args.check_access:
-            # HEAD verifies access to the gated blob, rather than just its card.
+            # 对实际权重文件发起HEAD请求，验证当前凭据的下载权限。
             from huggingface_hub import get_hf_file_metadata, hf_hub_url
             get_hf_file_metadata(hf_hub_url(REPO, "sam3.pt", revision=info.sha, endpoint=ENDPOINT), token=True)
             print(json.dumps({"access_verified": True, **metadata}, indent=2, ensure_ascii=False))
             return 0
 
         args.output.mkdir(parents=True, exist_ok=True)
-        # Downloads are pinned to the metadata's commit; local_dir supports resume.
+        # 下载固定到查询元数据时的提交，保证校验的是同一版本，并支持续传。
         for filename in ["config.json", "sam3.pt"]:
             hf_hub_download(REPO, filename, revision=info.sha, token=True,
                             endpoint=ENDPOINT, local_dir=args.output)
@@ -74,6 +76,7 @@ def main(argv=None) -> int:
         print("下载完成，正在核对文件大小和SHA-256。", flush=True)
         metadata["sha256"] = verify_file(path, expected_size, expected_sha)
         from tabletop_tidy.weights import inspect_checkpoint
+        # 完整性和归档结构都通过后才写下载清单；模型加载在推理阶段完成。
         structure = inspect_checkpoint(path)
         if not structure["is_sam3_candidate"]:
             raise ValueError("下载文件的PyTorch归档结构检查失败")

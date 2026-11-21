@@ -30,6 +30,7 @@ class ViewerClosed(Exception):
 
 
 class LiveView:
+    # 窗口使用单独的MjData，按约30帧每秒从仿真状态同步位置、速度和时间。
     def __init__(self, viewer, model, display, data):
         self.viewer, self.model, self.display, self.data = viewer, model, display, data
         self.next_frame = 0.
@@ -59,6 +60,7 @@ class LiveView:
         self.next_frame += 1 / 30
 
     def idle(self):
+        # 推理和规划等耗时阶段也让窗口处理刷新，并及时响应关闭操作。
         if not self.viewer:
             return
         if not self.viewer.is_running():
@@ -74,6 +76,7 @@ class LiveView:
 
 
 def inference_worker(python, worker_args, idle):
+    # 用推理环境的Python启动独立进程，将标准输出和错误合并，失败时读出日志。
     worker = ROOT / "scripts/infer_scene.py"
     with TemporaryFile() as log:
         with subprocess.Popen([str(python), str(worker), *map(str, worker_args)],
@@ -83,6 +86,7 @@ def inference_worker(python, worker_args, idle):
                     idle()
                     time.sleep(.05)
             finally:
+                # 等待期间如果关闭窗口，结束仍在运行的推理进程。
                 if process.poll() is None:
                     process.terminate()
             if process.returncode != 0:
@@ -92,6 +96,7 @@ def inference_worker(python, worker_args, idle):
 
 
 def observe(model, data, config, args, view, report):
+    # 两个推理子进程通过临时文件交换数据，退出时随目录清理。
     with TemporaryDirectory(prefix="tabletop-tidy-") as directory:
         work = Path(directory)
         frame_dir = work / "frame"
@@ -113,6 +118,7 @@ def observe(model, data, config, args, view, report):
 
         segmentation_report = json.loads((segmentation / "sam3.json").read_text())
         grasp_report = json.loads((grasps / "graspgenx.json").read_text())
+        # 持久报告保留推理摘要；候选位姿、分数和点云在临时文件清理前读入内存。
         report.append({stage["stage"]: {**stage, "objects": [
             {key: value for key, value in obj.items() if key != "file"} for obj in stage["objects"]]}
             for stage in (segmentation_report, grasp_report)})
@@ -127,6 +133,7 @@ def observe(model, data, config, args, view, report):
 
 
 def run_task(arm, config, args, view, report):
+    # 先打开收纳盒，再采集场景和逐件整理，物品验收通过后才合盖。
     model, data = arm.model, arm.data
     settle = config["evaluation"]["settle_seconds"]
     arm.hold(settle)
@@ -139,17 +146,17 @@ def run_task(arm, config, args, view, report):
         report["lids"].append({"category": category, "action": "open", "error": str(error)})
         raise
 
-    # Park clear of the fixed camera before acquiring RGB-D.
+    # 采集RGB-D前将机械臂停回初始关节姿态，减小对固定相机视野的遮挡。
     park_arm(arm)
     candidates = observe(model, data, config, args, view, report["inference"])
     lanes = dict.fromkeys(config["trays"], -1)
 
     def object_height(obj):
+        # 用点云高度的第95百分位排序，缺少候选的物品排到最后。
         observed = candidates.get(obj["name"])
         return float(np.percentile(observed[2][:, 2], 95)) if observed else float("inf")
 
-    # Put low-profile objects in the front row, where the wrist has extra
-    # clearance when it comes down closer to the bin rim.
+    # 每个盒子先用前方槽位放较矮的物品，为贴近盒沿下降的手腕留出空间。
     for obj in sorted(config["objects"], key=object_height):
         name, category = obj["name"], obj["category"]
         result = {"name": name, "category": category, "attempts": []}
@@ -165,7 +172,7 @@ def run_task(arm, config, args, view, report):
             entry["rejected_candidates"] = failures
             if plan is None:
                 entry["error"] = "No feasible grasp and placement"
-                # The dry run leaves physics unchanged, so refresh only if the target was missing.
+                # 候选只在仿真副本中试跑。缺少目标候选时，重拍才可能提供新的输入。
                 if name not in candidates and attempt < config["execution"]["max_attempts_per_object"]:
                     candidates.update(observe(model, data, config, args, view, report["inference"]))
                     continue
@@ -174,6 +181,7 @@ def run_task(arm, config, args, view, report):
             contact = ContactCheck(model, data, name)
 
             def move_step():
+                # 执行已选方案时，每个物理步都处理画面更新和接触检查。
                 view.step()
                 contact.check()
 
@@ -189,7 +197,7 @@ def run_task(arm, config, args, view, report):
             if result["evaluation"]["success"]:
                 lanes[category] = 1
                 break
-            # Take an updated RGB-D observation when the real attempt moved the object.
+            # 实际抓放可能改变物品姿态，先松手抬高，再为下一次尝试重新观测。
             arm.open()
             retreat = arm.tcp_position()
             retreat[2] = max(.23, retreat[2])
@@ -229,6 +237,7 @@ def main():
     report = {"seed": args.seed, "success": False, "lids": [], "objects": [], "inference": []}
 
     with TemporaryDirectory(prefix="tabletop-scene-") as scratch:
+        # 完整任务使用无盒盖执行器的场景，盒盖由机械臂抓住把手开合。
         scene = build_scene(config, sample_layout(config, args.seed), Path(scratch) / "scene.xml", powered_lids=False)
         model = mj.MjModel.from_xml_path(str(scene))
         tune_gripper(model)
@@ -252,6 +261,7 @@ def main():
                 report["error"] = str(error)
                 print(f"[ERROR] {error}", file=sys.stderr, flush=True)
 
+            # 即使任务中途停止也记录最终状态。成功要求物品合格、全部盒盖闭合且合盖动作齐全。
             report["final_evaluation"] = evaluate(model, data, config)
             report["final_lids"] = []
             for category in config["trays"]:

@@ -8,6 +8,7 @@ import mujoco
 import numpy as np
 
 
+# 绕基座X轴转180°，使工具坐标系的正Z轴指向桌面。
 DOWNWARD = np.diag([1.0, -1.0, -1.0])
 
 
@@ -25,12 +26,14 @@ class PandaController:
                  on_step: Callable[[], None] | None = None):
         self.model, self.data, self.on_step = model, data, on_step
         self.joints = np.array([model.joint(f"joint{i}").id for i in range(1, 8)])
+        # 关节位置和速度在MuJoCo中使用不同的地址表；雅可比矩阵按速度维度取列。
         self.qadr = model.jnt_qposadr[self.joints]
         self.dadr = model.jnt_dofadr[self.joints]
         self.actuators = np.array([model.actuator(f"actuator{i}").id for i in range(1, 8)])
         self.gripper = model.actuator("actuator8").id
         self.tcp = model.site("tcp").id
         self.base = model.body("link0").id
+        # 逆运动学在独立状态里试算，关节执行器仍跟踪真实仿真状态的目标。
         self.ik_data = mujoco.MjData(model)
         self.ik_data.qpos[:] = data.qpos
         self.limits = model.jnt_range[self.joints]
@@ -47,7 +50,7 @@ class PandaController:
 
     def step(self, count: int = 1) -> None:
         for _ in range(count):
-            # Gravity/Coriolis compensation applies only to arm joints.
+            # 仅对机械臂关节补偿重力和科里奥利等偏置力，夹爪和物体继续由仿真接触驱动。
             self.data.qfrc_applied[self.dadr] = self.data.qfrc_bias[self.dadr]
             mujoco.mj_step(self.model, self.data)
             if not np.isfinite(self.data.qpos).all():
@@ -72,6 +75,7 @@ class PandaController:
         for _ in range(350):
             mujoco.mj_forward(m, d)
             ep = target_p - d.site_xpos[self.tcp]
+            # 将当前姿态到目标姿态的相对旋转转为短弧旋转向量，与位置误差一起求解。
             delta_r = target_r @ d.site_xmat[self.tcp].reshape(3, 3).T
             mujoco.mju_mat2Quat(quat, delta_r.ravel())
             if quat[0] < 0:
@@ -80,10 +84,12 @@ class PandaController:
             if np.linalg.norm(ep) < 0.00015 and np.linalg.norm(rotvec) < 0.001:
                 return d.qpos[self.qadr].copy()
             mujoco.mj_jacSite(m, d, jp, jr, self.tcp)
+            # 降低姿态项权重，并用阻尼抑制接近奇异姿态时过大的关节更新。
             jac = np.vstack([jp[:, self.dadr], 0.4 * jr[:, self.dadr]])
             error = np.concatenate([ep, 0.4 * rotvec])
             dq = jac.T @ np.linalg.solve(jac @ jac.T + 0.002**2 * np.eye(6), error)
             dq *= min(1.0, 0.12 / max(np.max(np.abs(dq)), 1e-9))
+            # 每轮限制最大步长，并为关节限位预留少量余量。
             d.qpos[self.qadr] = np.clip(d.qpos[self.qadr] + dq,
                                        self.limits[:, 0] + .002, self.limits[:, 1] - .002)
         raise RuntimeError(f"IK failed at {position}: position error {np.linalg.norm(ep):.4f} m, "
@@ -102,7 +108,7 @@ class PandaController:
             end_q *= -1
         angle = np.arccos(np.clip(start_q @ end_q, -1., 1.))
         seed = self.data.qpos[self.qadr].copy()
-        # Check reachability before advancing the simulation.
+        # 先确认终点可达，再按平滑时间曲线插值位置和四元数姿态。
         self.solve_ik(target, rotation, seed=seed)
         steps_per_update = max(1, round(.02 / self.model.opt.timestep))
         updates = max(1, round(duration / (steps_per_update * self.model.opt.timestep)))
@@ -118,11 +124,10 @@ class PandaController:
             quat /= np.linalg.norm(quat)
             rotation = np.empty(9)
             mujoco.mju_quat2Mat(rotation, quat)
+            # 用上一采样点的关节解作为初值，让相邻位姿沿同一解附近求解。
             seed = self.solve_ik(desired, rotation.reshape(3, 3), seed=seed)
             planned.append(seed)
-        # Validate the entire segment in isolated IK data before advancing
-        # physics. An unreachable intermediate pose must not leave the robot
-        # partway down a failed approach.
+        # 整段都有逆运动学解后才下发关节目标，避免中间点无解时机械臂停在半路。
         for seed in planned:
             self.data.ctrl[self.actuators] = seed
             self.step(steps_per_update)
@@ -136,6 +141,7 @@ class PandaController:
         return result
 
     def open(self) -> None:
+        # 夹爪执行器以255和0分别表示张开和闭合目标，留出仿真时间让双指到位。
         self.data.ctrl[self.gripper] = 255.0
         self.hold(.6)
 
@@ -161,6 +167,7 @@ def pick_and_place(controller: PandaController, coor1: np.ndarray, coor2: np.nda
                    cube_size: float = .04, clearance_z: float = .28,
                    on_stage: Callable[[str], None] | None = None) -> dict:
     """Pick from top-surface Coor1; place above interior-floor Coor2."""
+    # 单立方体流程从两个表面坐标和边长估算抓取中心与释放高度。
     c = controller
     coor1, coor2 = np.asarray(coor1), np.asarray(coor2)
     if not all(np.isfinite(p).all() and .15 < p[0] < .75 and abs(p[1]) < .45
@@ -170,8 +177,7 @@ def pick_and_place(controller: PandaController, coor1: np.ndarray, coor2: np.nda
     release = coor2 + np.array([0., 0., cube_size / 2 + .035])
     above_cube = np.array([grasp[0], grasp[1], clearance_z])
     above_basket = np.array([release[0], release[1], clearance_z])
-    # Near the base, a vertical wrist has a disconnected reachable column.
-    # Pitch the palm outward while retaining the cube-aligned closing axis.
+    # 靠近基座时将手掌向外倾斜，让下降路径可达，并保留与立方体对齐的闭合轴。
     pitch = np.deg2rad(45. if np.linalg.norm(grasp[:2]) < .30 else 0.)
     cp, sp = np.cos(pitch), np.sin(pitch)
     grasp_rotation = np.array([[cp, 0., sp], [0., 1., 0.], [-sp, 0., cp]]) @ DOWNWARD

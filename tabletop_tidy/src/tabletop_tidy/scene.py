@@ -29,6 +29,7 @@ def _s(values):
 def load_config(path: Path | str | None = None) -> dict:
     with Path(path or ROOT / "configs/task.json").open(encoding="utf-8") as stream:
         config = json.load(stream)
+    # 配置中的物品名必须和下方六个建模函数对应，分类则决定验收时使用的收纳盒。
     names = [obj["name"] for obj in config["objects"]]
     if len(names) != 6 or len(set(names)) != 6:
         raise ValueError("Expected six unique object names")
@@ -49,8 +50,9 @@ def sample_layout(config: dict, seed: int) -> dict:
     lo = np.array([region["x_m"][0], region["y_m"][0]])
     hi = np.array([region["x_m"][1], region["y_m"][1]])
     clearance = region["gripper_clearance_m"]
+    # 优先摆放半径大的物品。每件物品用水平包围圆预留边界和夹爪间距。
     objects = sorted(config["objects"], key=lambda item: -item["radius_m"])
-    # Restart the whole packing to avoid a late-object dead end at this density.
+    # 后续物品找不到位置时，从空桌面重新采样，避免被先前的摆位卡住。
     budget = int(region["max_attempts"])
     for _ in range(100):
         placed = {}
@@ -92,6 +94,7 @@ def _loft_faces(sections, *, loop=False):
     """Triangulate a surface between cross sections with matching vertices."""
     count, width = sections.shape[:2]
     faces = []
+    # 相邻截面的对应顶点围成四边形，每个四边形拆为两个三角形。
     for section in range(count if loop else count - 1):
         start = section * width
         end = (section + 1) % count * width
@@ -99,6 +102,7 @@ def _loft_faces(sections, *, loop=False):
             following = (index + 1) % width
             faces.extend([(start + index, start + following, end + following),
                           (start + index, end + following, end + index)])
+    # 环形零件首尾相连，其余零件用三角形封住两端。
     if not loop:
         end = (count - 1) * width
         for index in range(1, width - 1):
@@ -108,12 +112,13 @@ def _loft_faces(sections, *, loop=False):
 
 
 def _mesh_part(body, assets, name, sections, collision_parts, *, material, loop=False, density=7800):
+    # 第2组网格负责外观，关闭碰撞且质量为零；第3组负责接触和质量。
     vertices = _s(sections.ravel())
     faces = " ".join(str(i) for face in _loft_faces(sections, loop=loop) for i in face)
     ET.SubElement(assets, "mesh", name=name, vertex=vertices, face=faces, smoothnormal="true")
     _geom(body, "mesh", mesh=name, rgba=None, material=material,
           contype="0", conaffinity="0", density="0", group="2")
-    # MuJoCo computes a convex hull for each collision mesh without faces.
+    # 每块碰撞网格只提供顶点，由MuJoCo生成凸包；分块能保留杯口等凹陷。
     for index, part in enumerate(collision_parts):
         hull = f"{name}_collision_{index}"
         ET.SubElement(assets, "mesh", name=hull, vertex=_s(part.ravel()))
@@ -123,7 +128,7 @@ def _mesh_part(body, assets, name, sections, collision_parts, *, material, loop=
 def _cup(body, assets):
     angle = np.linspace(0, 2 * np.pi, 60, endpoint=False)
     circle = np.column_stack((np.cos(angle), np.sin(angle)))
-    # Revolve the ceramic profile from the recessed underside to the inner floor.
+    # 将从杯底凹槽到内底的径向剖面旋转一圈，生成杯身和内壁。
     foot = [(.005, .0025), (.021, .0025), (.023, .0018), (.024, .0005),
             (.025, 0), (.027, 0), (.028, .0009), (.0285, .0036)]
     wall = [(.030, .005), (.032, .0075), (.034, .012), (.035, .021),
@@ -135,7 +140,7 @@ def _cup(body, assets):
     shell = np.array([np.column_stack((radius * circle, np.full(len(angle), z)))
                       for radius, z in foot + wall + floor])
 
-    # Short wedges leave the cavity open. A flat circular contact supports the foot.
+    # 用短扇形凸包围成杯壁以保留空腔，杯脚用薄圆柱接触桌面。
     wall_sections = shell[len(foot):len(foot) + len(wall)]
     collision = [wall_sections[:, np.arange(start, start + 4) % len(angle)]
                  for start in range(0, len(angle), 3)]
@@ -145,7 +150,7 @@ def _cup(body, assets):
     _geom(body, "cylinder", size=[.027, .0018], pos=[0, 0, .0018],
           group="3", density=2350)
 
-    # The C-shaped handle widens into the wall at both roots.
+    # 沿C形中心线摆放椭圆截面，在与杯壁相接的两端加宽。
     arc = np.linspace(-np.pi / 2, np.pi / 2, 25)
     cos_arc, sin_arc = np.cos(arc), np.sin(arc)
     centers = np.column_stack((.033 + .033 * cos_arc, np.zeros(len(arc)),
@@ -164,6 +169,7 @@ def _cup(body, assets):
 
 
 def _spoon(body, assets):
+    # 由内到外计算椭圆环的高度，组合勺碗的底面、勺沿和上表面。
     angle = np.linspace(0, 2 * np.pi, 48, endpoint=False)
     c, s = np.cos(angle), np.sin(angle)
     radius = np.array([.14, .34, .55, .73, .87, .96, 1.])[:, None]
@@ -177,7 +183,7 @@ def _spoon(body, assets):
     rim[:, :2] += np.column_stack((c, s)) * .0004
     bowl = np.concatenate((bottom, rim[None], top[::-1]))
 
-    # The center patch and short radial wedges follow the bowl on both sides.
+    # 中心小片和沿半径分布的楔块贴合勺碗上下两侧，保留勺面的凹陷。
     bowl_collision = [np.concatenate((bottom[0], top[0]))[::2]]
     for inner, outer in zip((0, 2, 4), (2, 4, 6)):
         for start in range(0, len(angle), 4):
@@ -186,7 +192,7 @@ def _spoon(body, assets):
                                                   top[[inner, outer]][:, arc])))
     _mesh_part(body, assets, "spoon_bowl", bowl, bowl_collision, material="flatware_steel")
 
-    # Axial stations give the handle a rounded butt and a raised, narrower neck.
+    # 沿勺柄布置截面，逐渐收窄并抬高靠近勺碗的部位，柄尾保持圆润。
     stations = [
         (-.073, .0004, .0017, .0003), (-.072, .0030, .0017, .0011),
         (-.069, .0061, .0017, .0016), (-.063, .0072, .0018, .0017),
@@ -215,7 +221,7 @@ def _wrench_head_sections(outer, inner, height):
 
 
 def _wrench(body, assets):
-    # A 12-point box end. Short convex sections leave the bore open.
+    # 梅花端有12个齿尖，环周分块生成碰撞凸包以保留通孔。
     angle = np.linspace(0, 2 * np.pi, 48, endpoint=False)
     circle = np.column_stack((np.cos(angle), np.sin(angle)))
     points = circle[::2] * np.tile([.0118, .0100], 12)[:, None]
@@ -226,7 +232,7 @@ def _wrench(body, assets):
                [ring[[i, (i+1) % len(ring), (i+2) % len(ring)]] for i in range(0, len(ring), 2)],
                material="tool_steel", loop=True)
 
-    # Parallel jaws transition to the relieved throat, rotated 15 degrees from the handle.
+    # 开口端从平行夹口过渡到内凹喉部，相对手柄转15°。
     jaw = np.array([[.018, .009], [-.002, .009], [-.009, .003],
                     [-.009, -.003], [-.002, -.009], [.018, -.009]])
     inner = np.concatenate([np.linspace(a, b, 7, endpoint=False) for a, b in zip(jaw, jaw[1:])]
@@ -241,7 +247,7 @@ def _wrench(body, assets):
     _mesh_part(body, assets, "wrench_open_end", head,
                [head[i:i+4] for i in range(0, len(head) - 1, 3)], material="tool_steel")
 
-    # The forged shank flares and thickens where it meets each head.
+    # 柄部沿长度用带倒角的截面建模，在连接两端扳手头的位置加宽加厚。
     stations = [(-.050, .0100, .002, .0078), (-.041, .0097, .0017, .0072),
                 (-.029, .0075, .0017, .0064), ( .010, .0074, .0017, .0064),
                 ( .029, .0085, .0015, .0069), ( .042, .0100, .0013, .0070),
@@ -260,8 +266,7 @@ def _wrench(body, assets):
 
 def _screwdriver(body, assets):
     angle = np.linspace(0, 2 * np.pi, 64, endpoint=False)
-    # Palm swell, finger waist and flared guard of a two-material moulded handle.
-    # The slightly flattened six-lobed section also keeps the tool from rolling.
+    # 柄部沿轴线做出握持鼓包、指槽和护缘；略扁的六瓣截面减小滚动倾向。
     stations = [
         (-.080, .0030, .0030), (-.079, .0068, .0065),
         (-.076, .0108, .0105), (-.070, .0138, .0135),
@@ -282,7 +287,7 @@ def _screwdriver(body, assets):
                [handle[i:i+3] for i in range(0, len(handle) - 2, 2)] + [handle[-2:]],
                material="screwdriver_red", density=1050)
 
-    # Six rubber inserts follow the handle rather than floating over a capsule.
+    # 按柄部截面插值生成六条贴合表面的橡胶装饰条。
     grip_x = np.array([-.073, -.070, -.060, -.047, -.035, -.025, -.022])
     widths = np.interp(grip_x, np.array(stations)[:, 0], np.array(stations)[:, 1])
     heights = np.interp(grip_x, np.array(stations)[:, 0], np.array(stations)[:, 2])
@@ -305,7 +310,7 @@ def _screwdriver(body, assets):
                         [(-.007, .0047), (-.0063, .0049), (-.0035, .0049), (-.0028, .0031)]])
     _mesh_part(body, assets, "screwdriver_ferrule", ferrule, [ferrule], material="tool_steel")
 
-    # The working end is a forged, tapered flat blade, narrower than the handle.
+    # 圆杆末端接上逐渐变薄的一字刀口，外观和碰撞分别建模。
     _geom(body, "cylinder", size=[.0031, .0325], pos=[.0285, 0, center_z],
           euler=[0, np.pi / 2, 0], rgba=None, material="driver_chrome",
           contype=0, conaffinity=0, density=0, group=2)
@@ -337,7 +342,7 @@ def _rounded_sections(stations, corner_radius):
 
 
 def _stapler(body, assets):
-    # Each station gives x, half width, and the lower and upper heights.
+    # 截面参数依次为X位置、半宽、底面高度和顶面高度。
     pad = _rounded_sections([
         (-.051, .009, .0007, .0021), (-.048, .015, .0002, .0026),
         (-.043, .018, 0, .003), (.044, .018, 0, .003),
@@ -347,7 +352,7 @@ def _stapler(body, assets):
     _geom(body, "box", size=[.0435, .017, .0015], pos=[.0005, 0, .0015],
           group=3, density=1100)
 
-    # The front of the magazine is raised above the clinching plate.
+    # 钉槽前端抬高，和底座上的弯钉板之间留出进纸间隙。
     parts = [
         ("base", "stapler_base", 2100, .0026, [
             (-.054, .008, .0034, .0064), (-.052, .014, .0024, .0086),
@@ -408,7 +413,7 @@ def _tape_dispenser(body, assets):
                [base[i:i+3] for i in range(0, len(base) - 2, 2)] + [base[-2:]],
                material="dispenser_shell", density=2300)
 
-    # Sculpted cheeks support the hollow spool and leave the reel bore visible.
+    # 两片侧板支撑空心卷轴，中间保留可见的轴孔。
     stations = [
         (-.055, .0015, .010, .022), (-.052, .0030, .009, .033),
         (-.047, .0037, .009, .039), (-.040, .0040, .009, .041),
@@ -446,7 +451,7 @@ def _tape_dispenser(body, assets):
                        (.0266, -.0146), (.0266, .0146), (.0263, .0154),
                        (.0255, .0159), (.0143, .0159)],
          "tape_amber", collision=True)
-    # Thin concentric seams suggest wound film at both cut faces of the roll.
+    # 在胶带卷两侧加入细同心环，表现胶带的层叠截面。
     for side in [-1, 1]:
         for index, radius in enumerate([.016, .0185, .021, .0235, .025]):
             y = side * .01596
@@ -472,7 +477,7 @@ def _tape_dispenser(body, assets):
                            (x, y, .0362)] for x in [.0538, .0547]])
         _mesh_part(body, assets, f"tape_tooth_{index}", tooth, [], material="driver_chrome")
 
-    # Analytic tangent joins the wound reel to the cutting edge without a floating strip.
+    # 从切割刃上的终点求卷圆的切点，使伸出的胶带与卷筒连续相接。
     end = np.array([.0538, .0354])
     delta = end - center
     tangent_angle = np.arctan2(delta[1], delta[0]) + np.arccos(.0266 / np.linalg.norm(delta))
@@ -489,6 +494,7 @@ BUILDERS = {"cup": _cup, "spoon": _spoon, "wrench": _wrench, "screwdriver": _scr
 
 
 def _camera_axes(position, target):
+    # 由视线和世界竖直方向求相机的右轴和上轴，写入MJCF的xyaxes属性。
     direction = np.array(target) - np.array(position)
     direction /= np.linalg.norm(direction)
     right = np.cross(direction, [0., 0., 1.])
@@ -500,7 +506,7 @@ def _camera_axes(position, target):
 def _box_label(body, assets, category, half_width, front_y):
     name = f"storage_box_label_{category}"
     width, height, thickness = .86 * half_width, .022, .0005
-    # Explicit UVs keep the text upright on the outward-facing plate.
+    # 指定纹理坐标，让收纳盒外侧标签文字保持正向。
     vertices = [(x, y, z) for y in (-thickness, thickness)
                 for x, z in [(-width, -height), (width, -height),
                              (width, height), (-width, height)]]
@@ -544,8 +550,7 @@ def _storage_box(world, assets, actuators, category, box, *, powered_lid):
     ET.SubElement(lid, "joint", name=name, type="hinge", axis="-1 0 0",
                   range=_s([0, BOX_OPEN_ANGLE]), damping=".04" if powered_lid else ".012")
     if not powered_lid:
-        # A counterweighted lid stays against the nearest stop once released
-        # on either side of its over-center point (about 36 degrees).
+        # 调整质心模拟配重。松手时，平衡角约36°的两侧分别滑向闭合和打开限位。
         ET.SubElement(lid, "inertial", pos="0 -.035 .048", mass=".16", diaginertia=".001 .0011 .0011")
     _geom(lid, "box", name=f"{name}_panel", pos=[0, -outer_y, 0],
           size=[outer_x + .001, outer_y + .001, .004], rgba=rim)
@@ -564,6 +569,7 @@ def _storage_box(world, assets, actuators, category, box, *, powered_lid):
     _geom(lid, "cylinder", name=f"{name}_handle",
           fromto=[-half_length, handle_y, handle_z, half_length, handle_y, handle_z],
           size=[.008], rgba=hardware)
+    # 预览模式添加盒盖位置执行器，供键盘切换；完整任务由机械臂抓把手开合。
     if powered_lid:
         ET.SubElement(actuators, "position", name=name, joint=name,
                       ctrlrange=_s([0, BOX_OPEN_ANGLE]), forcerange="-1.2 1.2", kp="18", kv=".35")
@@ -572,7 +578,7 @@ def _storage_box(world, assets, actuators, category, box, *, powered_lid):
 def build_scene(config: dict, layout: dict, output: Path, *, powered_lids: bool = True) -> Path:
     """Write an independent MJCF beside the copied Panda include."""
     root = ET.Element("mujoco", model="panda_semantic_tidying")
-    # Absolute include makes outputs portable within this installation.
+    # 使用本地资产的绝对路径，便于从任意输出目录加载生成的场景XML。
     ET.SubElement(root, "include", file=str(ROOT / "assets/panda_scene.xml"))
     ET.SubElement(root, "compiler", angle="radian", autolimits="true",
                   meshdir=str(ROOT / "assets/robots/franka_emika_panda/assets"))
@@ -613,6 +619,7 @@ def build_scene(config: dict, layout: dict, output: Path, *, powered_lids: bool 
     ET.SubElement(world, "light", pos=".4 -.3 1.8", dir="0 0 -1", diffuse=".55 .55 .55")
     _geom(world, "plane", pos=[0, 0, -.75], size=[3, 3, .1], rgba=[.20, .22, .25, 1])
     _geom(world, "box", pos=[.40, 0, -.035], size=[.65, .57, .035], rgba=[.48, .46, .42, 1])
+    # eye_to_hand是固定在场景中的感知相机，overview用于输出全景预览图。
     for name, pos, target, fovy in [
             ("eye_to_hand", [.95, -.25, 1.15], [.48, -.03, 0], 50),
             ("overview", [1.25, -1.35, 1.10], [.43, -.01, .13], 45)]:
@@ -624,11 +631,13 @@ def build_scene(config: dict, layout: dict, output: Path, *, powered_lids: bool 
         item = layout["objects"][obj["name"]]
         body = ET.SubElement(world, "body", name=obj["name"], pos=_s(item["xyz_m"]),
                              euler=_s([0, 0, item["yaw_rad"]]))
+        # 自由关节允许物体随重力和接触平移、旋转。
         ET.SubElement(body, "freejoint", name=f"{obj['name']}_joint")
         BUILDERS[obj["name"]](body, assets)
         if not powered_lids:
             scale = config["execution"].get("pickup_thickness_scale", {}).get(obj["name"], 1.)
             if scale != 1.:
+                # 仅按配置缩放指定物品网格的Z尺寸，并反向修正密度以补偿体积变化。
                 meshes = {geom.attrib["mesh"] for geom in body.findall("geom")}
                 for mesh in assets.findall("mesh"):
                     if mesh.attrib["name"] in meshes:
@@ -644,6 +653,7 @@ def build_scene(config: dict, layout: dict, output: Path, *, powered_lids: bool 
 
 def initialize(model: mujoco.MjModel, data: mujoco.MjData, *, lids_open: bool = True) -> None:
     import mujoco
+    # 初始化关节位置时同步设置执行器目标，避免启动时拉向不同的角度。
     for index in range(7):
         joint = model.joint(f"joint{index+1}")
         data.qpos[joint.qposadr] = HOME[index]
@@ -673,7 +683,7 @@ def body_bounds(model, data, name: str, *, collision_only=True):
         if collision_only and not (model.geom_contype[index] or model.geom_conaffinity[index]):
             continue
         if model.geom_type[index] == mujoco.mjtGeom.mjGEOM_MESH:
-            # A rotated mesh bounding box can put the spoon's curved shell below the table.
+            # 直接变换网格顶点，避免旋转局部包围盒的空角让勺碗看起来穿过桌面。
             mesh = model.geom_dataid[index]
             start = model.mesh_vertadr[mesh]
             local = model.mesh_vert[start:start + model.mesh_vertnum[mesh]]
@@ -691,12 +701,14 @@ def evaluate(model, data, config) -> dict:
     import mujoco
     details = []
     limits = config["evaluation"]
+    # 使用仿真真值做验收。完整放入正确盒子、低于盒沿、接近盒底且速度达标才算成功。
     for obj in config["objects"]:
         low, high = body_bounds(model, data, obj["name"], collision_only=False)
         box = config["trays"][obj["category"]]
         center, half = np.array(box["center_xy_m"]), np.array(box["inner_half_size_xy_m"])
         inside = bool(np.all(low[:2] >= center-half) and np.all(high[:2] <= center+half))
         fits_below_rim = bool(high[2] <= BOX_RIM_HEIGHT)
+        # MuJoCo物体速度向量先存角速度，再存线速度。
         velocity = np.zeros(6)
         mujoco.mj_objectVelocity(model, data, mujoco.mjtObj.mjOBJ_BODY,
                                 model.body(obj["name"]).id, velocity, 0)

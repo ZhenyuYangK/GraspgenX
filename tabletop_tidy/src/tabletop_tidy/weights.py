@@ -8,6 +8,7 @@ import zipfile
 
 
 def inspect_checkpoint(path: Path) -> dict:
+    # 报告区分文件缺失、占位文件、已知格式和结构异常；模型加载与推理标记始终为False。
     path = Path(path)
     report = {"path": str(path.absolute()), "is_sam3_candidate": False,
               "model_loaded": False, "inference_run": False}
@@ -17,6 +18,7 @@ def inspect_checkpoint(path: Path) -> dict:
     report["size_bytes"] = size
     if path.name.startswith("sam_vit_"):
         return {**report, "status": "sam1_weights"}
+    # 小文件可能只是Git LFS指针或旧机器留下的绝对路径文本。
     if size < 1024:
         try:
             text = path.read_text(encoding="utf-8").strip()
@@ -30,6 +32,7 @@ def inspect_checkpoint(path: Path) -> dict:
     if path.suffix == ".safetensors":
         try:
             with path.open("rb") as stream:
+                # 文件前8字节是小端序头长度，接下来是描述各张量的JSON头。
                 header_size = int.from_bytes(stream.read(8), "little")
                 if not 0 < header_size <= min(size-8, 100_000_000):
                     raise ValueError("Invalid safetensors header size")
@@ -39,6 +42,7 @@ def inspect_checkpoint(path: Path) -> dict:
                 raise ValueError("No tensors")
             payload = size-8-header_size
             intervals = []
+            # 偏移量以数据区开头为零点。已知类型按形状和元素字节数核对长度。
             dtype_sizes = {"F64": 8, "F32": 4, "F16": 2, "BF16": 2,
                            "I64": 8, "I32": 4, "I16": 2, "I8": 1, "U8": 1, "BOOL": 1}
             for tensor in tensors.values():
@@ -54,6 +58,7 @@ def inspect_checkpoint(path: Path) -> dict:
                 if tensor["dtype"] in dtype_sizes and end-start != count*dtype_sizes[tensor["dtype"]]:
                     raise ValueError("Tensor byte count does not match shape")
                 intervals.append((start, end))
+            # 张量区间从零开始连续覆盖数据区，检查重叠、空洞及末尾多余字节。
             previous_end = 0
             for start, end in sorted(intervals):
                 if start != previous_end:
@@ -61,6 +66,7 @@ def inspect_checkpoint(path: Path) -> dict:
                 previous_end = end
             if previous_end != payload:
                 raise ValueError("Trailing bytes outside tensor payload")
+            # 张量键前缀用于区分原生SAM3和需要单独适配的Transformers格式。
             if any(key.startswith("detector_model.") for key in tensors):
                 return {**report, "status": "transformers_format_requires_separate_adapter"}
             if not any(key.startswith("detector.") for key in tensors):
@@ -70,8 +76,7 @@ def inspect_checkpoint(path: Path) -> dict:
         except (ValueError, KeyError, TypeError, OSError) as error:
             return {**report, "status": "invalid_safetensors", "error": str(error)}
     if path.suffix in {".pt", ".pth"} and path.name.startswith("sam3"):
-        # Archive structure is checked here. Keys and model completeness are
-        # checked by the actual model loader, never inferred from the filename.
+        # 只读ZIP目录以识别PyTorch归档；张量键和模型完整性由加载器检查。
         if zipfile.is_zipfile(path):
             with zipfile.ZipFile(path) as archive:
                 if any(name.endswith("/data.pkl") for name in archive.namelist()):
@@ -85,6 +90,7 @@ def scan_checkpoints(root: Path) -> list[dict]:
     candidates = []
     ignored = {".git", ".cache", "vendor", "outputs", "__pycache__", "node_modules"}
     for directory, dirs, filenames in os.walk(Path(root)):
+        # 原地缩减遍历目录，跳过虚拟环境、第三方源码、缓存和输出。
         dirs[:] = [name for name in dirs if name not in ignored and not name.startswith(".venv")]
         for name in sorted(filenames):
             path = Path(directory) / name
